@@ -95,6 +95,65 @@ private func withTempDir(_ body: (URL) throws -> Void) rethrows {
     }
 }
 
+// MARK: - Owning-window CGWindowID (VAL-ACT-011 round 2)
+
+@Suite struct RefEntryOwnerWindowIDTests {
+    /// `Snapshot(roots:windowIDsByPath:)` stamps each ref with the CGWindowID of its
+    /// OWNING top-level window (looked up by the path's root prefix), so a ref built
+    /// from a handle-bearing walk records the authoritative window identity.
+    @Test func snapshotStampsEachRefWithItsOwningWindowID() {
+        let roots = [
+            window([button("A")]),   // root 0 -> window id 7001
+            window([button("B")]),   // root 1 -> window id 7002
+        ]
+        // A LiveElementTree-shaped map: window id present at the root AND propagated
+        // to descendants; the init only needs the root prefix.
+        let ids: [[Int]: CGWindowID] = [
+            [0]: 7001, [0, 0]: 7001,
+            [1]: 7002, [1, 0]: 7002,
+        ]
+        let snapshot = Snapshot(roots: roots, windowIDsByPath: ids)
+        #expect(snapshot.refs["e1"]?.ownerWindowID == 7001)  // button A, window 0
+        #expect(snapshot.refs["e2"]?.ownerWindowID == 7002)  // button B, window 1
+    }
+
+    /// A handle-free build (no window-id map) leaves `ownerWindowID` nil, so text
+    /// rendering and any pre-window-id caller keep working unchanged.
+    @Test func handleFreeSnapshotLeavesOwnerWindowIDNil() {
+        let snapshot = Snapshot(roots: [window([button("A")])])
+        #expect(snapshot.refs["e1"]?.ownerWindowID == nil)
+    }
+
+    /// The window id survives a persist/reload round-trip; being a window handle
+    /// NUMBER (not element content), it is safe to write and keeps `RefEntry`
+    /// value-free.
+    @Test func ownerWindowIDRoundTripsThroughTheSession() throws {
+        try withTempDir { dir in
+            let path = dir.appendingPathComponent("session.json").path
+            let ids: [[Int]: CGWindowID] = [[0]: 9099, [0, 0]: 9099]
+            let snapshot = Snapshot(roots: [window([button("A")])], windowIDsByPath: ids)
+            try SessionStore.save(snapshot, app: "app", pid: 1, to: path)
+
+            let reloaded = try #require(SessionStore.load(from: path))
+            guard case let .resolved(entry) = reloaded.resolve("e1") else {
+                Issue.record("expected e1 to resolve"); return
+            }
+            #expect(entry.ownerWindowID == 9099)
+        }
+    }
+
+    /// An older session written before the window-id field existed decodes with a
+    /// nil `ownerWindowID` (tolerant decode) rather than failing to load.
+    @Test func sessionWithoutOwnerWindowIDDecodesAsNil() throws {
+        let json = """
+        {"ref":"e1","role":"AXButton","path":[0,0]}
+        """
+        let entry = try JSONDecoder().decode(RefEntry.self, from: Data(json.utf8))
+        #expect(entry.ownerWindowID == nil)
+        #expect(entry.ancestors.isEmpty)
+    }
+}
+
 // MARK: - Corruption
 
 @Suite struct SessionStoreCorruptionTests {

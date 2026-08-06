@@ -387,6 +387,130 @@ private func terminalCode(_ target: ActPipeline.Target) -> MTouchExitCode? {
     }
 }
 
+// MARK: - Owning-window identity by CGWindowID (VAL-ACT-011 round 2)
+// The airtight regression the title-based ancestor chain could NOT cover: two
+// UNTITLED windows share the title `未命名`, so their ancestor chains are
+// identical and only the stable, unique CGWindowID tells them apart.
+
+@Suite struct ElementRelocationWindowIdentityTests {
+    private func attrs(_ role: String, subrole: String? = nil, title: String? = nil) -> AXAttributes {
+        AXAttributes(role: role, subrole: subrole, title: title)
+    }
+
+    /// Localized "Untitled": BOTH untitled TextEdit windows carry this EXACT title,
+    /// so a title-based ancestor chain is identical across them.
+    private let untitled = "未命名"
+
+    /// A LOW popup-button ref (e.g. e7) owned by an untitled window whose unique id
+    /// is `windowID`. Its own hints and its window-titled ancestor chain are
+    /// IDENTICAL to the twin in the sibling window; only `ownerWindowID` differs.
+    private func popupRef(path: [Int], windowID: CGWindowID?) -> RefEntry {
+        RefEntry(
+            node: AXNode(role: kAXPopUpButtonRole, actionable: true),
+            ref: "e7", path: path,
+            ancestors: [NodeHint(role: kAXWindowRole, subrole: "AXStandardWindow", title: untitled)],
+            ownerWindowID: windowID
+        )
+    }
+
+    /// Two untitled windows, each with one popup button; every hint AND the window
+    /// title is identical — only the CGWindowID differs (front 4001, back 4002).
+    private func twoUntitledWindows() -> (attrs: [[Int]: AXAttributes], ids: [[Int]: CGWindowID]) {
+        let attributes: [[Int]: AXAttributes] = [
+            [0]: attrs(kAXWindowRole, subrole: "AXStandardWindow", title: untitled),
+            [0, 0]: attrs(kAXPopUpButtonRole),
+            [1]: attrs(kAXWindowRole, subrole: "AXStandardWindow", title: untitled),
+            [1, 0]: attrs(kAXPopUpButtonRole),
+        ]
+        let ids: [[Int]: CGWindowID] = [[0]: 4001, [0, 0]: 4001, [1]: 4002, [1, 0]: 4002]
+        return (attributes, ids)
+    }
+
+    @Test func windowIDDisambiguatesTwoIdenticallyTitledWindows() {
+        // Both untitled windows present. The ancestor chain is IDENTICAL, so round 1
+        // could not tell them apart; the window id does — each ref resolves to ITS
+        // OWN popup, never the twin's.
+        let (attributes, ids) = twoUntitledWindows()
+        #expect(ElementRelocation.locatePath(
+            popupRef(path: [0, 0], windowID: 4001), in: attributes, windowIDsByPath: ids
+        ) == [0, 0])
+        #expect(ElementRelocation.locatePath(
+            popupRef(path: [1, 0], windowID: 4002), in: attributes, windowIDsByPath: ids
+        ) == [1, 0])
+    }
+
+    @Test func frontWindowClosedSlidesTwinIn_lowRefIsStaleNotMisdelivered() {
+        // THE regression. A LOW ref (e7) recorded on the FRONT untitled window
+        // (id 4001) at [0,0]. The front window closes; the BACK untitled window
+        // (id 4002) slides into root index 0, so a structurally-identical popup —
+        // same hints, SAME title `未命名`, so an IDENTICAL ancestor chain — now
+        // sits at [0,0]. Title-based identity would accept it (the round-1 hole);
+        // the differing window id rejects it -> STALE (nil). Nothing is acted on in
+        // the surviving window (no menu/popover opens there).
+        let afterClose: [[Int]: AXAttributes] = [
+            [0]: attrs(kAXWindowRole, subrole: "AXStandardWindow", title: untitled),
+            [0, 0]: attrs(kAXPopUpButtonRole),
+        ]
+        let ids: [[Int]: CGWindowID] = [[0]: 4002, [0, 0]: 4002]
+        #expect(ElementRelocation.locatePath(
+            popupRef(path: [0, 0], windowID: 4001), in: afterClose, windowIDsByPath: ids
+        ) == nil)
+    }
+
+    @Test func movedLowRefResolvesToItsOwnWindowAmongIdenticalTwins() {
+        // The popup shifted off its recorded path and BOTH untitled windows still
+        // hold a same-hint popup. Hint + ancestor matching alone is ambiguous (two
+        // identical-title candidates), so round 1 would give up (stale). The window
+        // id filters to the ONE popup in the ref's own window (4001).
+        let (attributes, ids) = twoUntitledWindows()
+        #expect(ElementRelocation.locatePath(
+            popupRef(path: [9, 9], windowID: 4001), in: attributes, windowIDsByPath: ids
+        ) == [0, 0])
+    }
+
+    @Test func genuineSurvivorInItsOwnWindowStillResolves() {
+        // The front (id 4001) window survived unchanged; only the back closed. The
+        // ref must still resolve at its path — the window gate must not over-reject
+        // a true survivor.
+        let survived: [[Int]: AXAttributes] = [
+            [0]: attrs(kAXWindowRole, subrole: "AXStandardWindow", title: untitled),
+            [0, 0]: attrs(kAXPopUpButtonRole),
+        ]
+        let ids: [[Int]: CGWindowID] = [[0]: 4001, [0, 0]: 4001]
+        #expect(ElementRelocation.locatePath(
+            popupRef(path: [0, 0], windowID: 4001), in: survived, windowIDsByPath: ids
+        ) == [0, 0])
+    }
+
+    @Test func olderSessionWithoutWindowIDDegradesToAncestorPositional() {
+        // A ref persisted before window ids existed carries ownerWindowID == nil.
+        // The window gate must not reject it (no id to compare) — it resolves by
+        // ancestor/position exactly as a round-1 session would, so upgrading the
+        // tool never bricks a live session.
+        let (attributes, ids) = twoUntitledWindows()
+        #expect(ElementRelocation.locatePath(
+            popupRef(path: [0, 0], windowID: nil), in: attributes, windowIDsByPath: ids
+        ) == [0, 0])
+    }
+}
+
+// MARK: - LiveElementTree window-id seam
+
+@Suite struct LiveElementTreeWindowIDTests {
+    @Test func memberwiseInitCarriesTheWindowIDMap() {
+        let tree = LiveElementTree(
+            nodes: [], elementsByPath: [:], attributesByPath: [:],
+            windowIDsByPath: [[0]: 5501, [0, 0]: 5501]
+        )
+        #expect(tree.windowIDsByPath == [[0]: 5501, [0, 0]: 5501])
+    }
+
+    @Test func memberwiseInitDefaultsToNoWindowIDs() {
+        let tree = LiveElementTree(nodes: [], elementsByPath: [:], attributesByPath: [:])
+        #expect(tree.windowIDsByPath.isEmpty)
+    }
+}
+
 // MARK: - Ref-verb back half via the LiveElementTree fake seam
 // (relocation-miss -> 3, AX-action-failure -> 1, success -> acted + persisted)
 

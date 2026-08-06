@@ -31,7 +31,15 @@ public struct Snapshot: Equatable, Sendable {
     /// The ref string for the Nth (1-based) actionable node in pre-order.
     public static func refToken(_ index: Int) -> String { "\(refPrefix)\(index)" }
 
-    public init(roots: [AXNode]) {
+    /// Build a snapshot, numbering refs afresh. `windowIDsByPath` optionally
+    /// supplies each walked node's owning-window CGWindowID (as produced by
+    /// `LiveElementTree.windowIDsByPath`); when present, each ref records the
+    /// STABLE, UNIQUE id of its owning top-level window so the act layer can
+    /// reject a same-hint impostor in a DIFFERENT — even identically-titled —
+    /// window (VAL-ACT-011). A handle-free caller (e.g. text rendering) passes no
+    /// map, leaving `ownerWindowID` nil; those refs relocate by ancestor/position
+    /// alone, exactly as before.
+    public init(roots: [AXNode], windowIDsByPath: [[Int]: CGWindowID] = [:]) {
         self.roots = roots
 
         var refs: [String: RefEntry] = [:]
@@ -46,7 +54,12 @@ public struct Snapshot: Equatable, Sendable {
             if node.actionable {
                 counter += 1
                 let ref = Snapshot.refToken(counter)
-                refs[ref] = RefEntry(node: node, ref: ref, path: path, ancestors: ancestors)
+                // The owning top-level window is the root at this path's head; its
+                // window id (when known) is the authoritative owning-window identity.
+                let ownerWindowID = windowIDsByPath[Array(path.prefix(1))]
+                refs[ref] = RefEntry(
+                    node: node, ref: ref, path: path, ancestors: ancestors, ownerWindowID: ownerWindowID
+                )
                 byPath[path] = ref
             }
             let childAncestors = ancestors + [NodeHint(node: node)]
@@ -167,10 +180,19 @@ public struct RefEntry: Equatable, Sendable, Codable {
     /// as an impostor rather than acted on (VAL-ACT-011). Still value-free: only
     /// role/subrole/title per ancestor.
     public let ancestors: [NodeHint]
+    /// The STABLE, UNIQUE CGWindowID of the ref's owning top-level window (nil when
+    /// unknown — e.g. a handle-free snapshot, an older session, or the menu bar).
+    /// Titles are NOT a unique window discriminator (two untitled TextEdit windows
+    /// share the title `未命名`), so the ancestor chain alone cannot tell them
+    /// apart; the window id can. It is the AUTHORITATIVE owning-window identity the
+    /// act layer requires to match at relocation — a same-hint element under a
+    /// different window id is an impostor. A window id is a window HANDLE number,
+    /// not element content, so recording it keeps `RefEntry` value-free.
+    public let ownerWindowID: CGWindowID?
 
     public init(
         ref: String, role: String, subrole: String?, title: String?,
-        frame: CGRect?, path: [Int], ancestors: [NodeHint] = []
+        frame: CGRect?, path: [Int], ancestors: [NodeHint] = [], ownerWindowID: CGWindowID? = nil
     ) {
         self.ref = ref
         self.role = role
@@ -179,31 +201,38 @@ public struct RefEntry: Equatable, Sendable, Codable {
         self.frame = frame
         self.path = path
         self.ancestors = ancestors
+        self.ownerWindowID = ownerWindowID
     }
 
-    public init(node: AXNode, ref: String, path: [Int], ancestors: [NodeHint] = []) {
+    public init(
+        node: AXNode, ref: String, path: [Int],
+        ancestors: [NodeHint] = [], ownerWindowID: CGWindowID? = nil
+    ) {
         self.init(
             ref: ref, role: node.role, subrole: node.subrole, title: node.title,
-            frame: node.frame, path: path, ancestors: ancestors
+            frame: node.frame, path: path, ancestors: ancestors, ownerWindowID: ownerWindowID
         )
     }
 
     /// A copy of this entry with its ancestor identity replaced — used when the
-    /// snapshot re-derives the chain authoritatively from the tree.
+    /// snapshot re-derives the chain authoritatively from the tree. The owning
+    /// window identity is preserved (it is not derivable from the handle-free tree,
+    /// so it must survive the re-derivation).
     func withAncestors(_ ancestors: [NodeHint]) -> RefEntry {
         RefEntry(
             ref: ref, role: role, subrole: subrole, title: title,
-            frame: frame, path: path, ancestors: ancestors
+            frame: frame, path: path, ancestors: ancestors, ownerWindowID: ownerWindowID
         )
     }
 
     private enum CodingKeys: String, CodingKey {
-        case ref, role, subrole, title, frame, path, ancestors
+        case ref, role, subrole, title, frame, path, ancestors, ownerWindowID
     }
 
-    /// Tolerant decode: a session written before ancestor identity existed simply
-    /// decodes with an empty chain (its nested refs then relocate conservatively as
-    /// stale — safe — while every fresh snapshot carries the full identity).
+    /// Tolerant decode: a session written before ancestor identity / the owning
+    /// window id existed simply decodes with an empty chain / nil window id (its
+    /// refs then relocate by ancestor/position alone — safe — while every fresh
+    /// snapshot carries the full identity).
     public init(from decoder: Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
         ref = try container.decode(String.self, forKey: .ref)
@@ -213,6 +242,7 @@ public struct RefEntry: Equatable, Sendable, Codable {
         frame = try container.decodeIfPresent(CGRect.self, forKey: .frame)
         path = try container.decode([Int].self, forKey: .path)
         ancestors = try container.decodeIfPresent([NodeHint].self, forKey: .ancestors) ?? []
+        ownerWindowID = try container.decodeIfPresent(CGWindowID.self, forKey: .ownerWindowID)
     }
 }
 
