@@ -70,6 +70,44 @@ The diff engine (M2), wait evaluator (M2), and act layer (M2) all consume `AXNod
   before sleeping (already-true returns fast), fails only at ≥ timeout, does exactly one check at
   `--timeout 0`, and never leaks threads on a hung target.
 
+## Seams & patterns (established M3-agent-surface)
+
+- **Screenshot pipeline** (`ScreenshotPipeline` over `LiveScreenCapture`): preflight Screen Recording
+  (exit 2, no file) → resolve target/path → capture (SCK) → all-black backstop → PNG encode → atomic
+  temp+rename write. Every collaborator is injectable, so the flow is unit-testable with zero SCK/TCC.
+  Pixel dims are `filter.contentRect` (points) × `filter.pointPixelScale`, so `pixels == points × scale`
+  holds by construction; `--window` addresses the SAME `CGWindowID` space `mtouch windows` prints.
+  Black-capture safety is two-layered — the SR preflight is the primary guard,
+  `ScreenCaptureImage.isEffectivelyBlank` the backstop — and neither ever writes a file.
+  `LiveScreenCapture` runs the async per-window SCK capture on a main-actor task and PUMPS the run loop
+  (`CFRunLoopRunInMode`) rather than blocking (the per-window path needs the main-thread window-server
+  connection; a blocked main thread trips `CGS_REQUIRE_INIT`), guarded by a 15 s deadline so the
+  one-shot CLI can never hang.
+- **MCP dispatch seam** (`MCPToolCatalog` + `MCPToolDispatch`, both SDK-free in MTouchKit): the single
+  source of truth for the seven tools and the one place a tool name + arguments map onto the existing
+  pipelines (Snapshot/Act/Wait/Screenshot, enumeration, DoctorReport) — never re-implementing their
+  logic — returning a `ToolResult` (payloads + isError). Payload parity holds because dispatch returns
+  the pipelines' outcome strings verbatim. Domain failures (unknown tool, missing/invalid arg, wait
+  timeout, stale ref, missing permission) are `isError` results; protocol problems (unknown method,
+  malformed frame, pre-initialize call) are JSON-RPC errors. The executable
+  (`Sources/mtouch/Commands/MCP.swift`) keeps stdout pure (only JSON-RPC frames; transport logger left
+  no-op), gates pre-init calls in the handler (the SDK's strict mode silently drops them), and hops
+  tool work to the main thread via a `CFRunLoopPerformBlock` run-loop block — NOT `MainActor.run` /
+  `DispatchQueue.main.async`, which would deadlock the screenshot capture's nested run-loop pump. The
+  long-running server reuses `GuardedWalk`, so it never leaks walk threads.
+- **Trajectory recorder** (`TrajectoryRecorder` + `TrajectoryRecord`): a cross-cutting OBSERVER both
+  surfaces route through — the CLI via `Support.swift recorded(…)`, MCP via
+  `MCPToolDispatch.dispatchRecorded(…)` — feeding one record model so a command and its tool shape
+  identically (same field names). Recording NEVER alters observable behavior: with `MTOUCH_TRAJECTORY`
+  unset it is a pure pass-through; when set it appends exactly one atomic `O_APPEND` `write(2)` of the
+  full `<json>\n` line, so a crash leaves every completed line parseable and concurrent writers never
+  interleave. Per-class shapes: snapshot carries the tree digest; a mutating act carries pre/post
+  `Session.digest` + the diff; reads carry no digests; screenshot references the written PNG path,
+  never image bytes. The digest chain links by construction (each act reads the prior act's persisted
+  digest). A directory/unwritable path aborts (exit 1) BEFORE running the operation — never a silent
+  unrecorded run — and a secure-input-refused `type`/`key` records the event but strips its
+  `text`/`combo` payload so a secret never persists.
+
 ## Interfaces (pinned; authority = plan.md "Interface semantics")
 
 - Exit codes: 0 ok · 1 runtime · 2 permission · 3 ref · 4 wait-timeout · 5 secure-input · 64 usage;
@@ -90,6 +128,7 @@ such assertions are verified at the unit level or deferred to an ungranted CI ru
 - **M1-perception** (sealed 2026-08-06): scaffold, doctor/TCC preflight, app/window enumeration, AX
   walker + Electron fallback, textualization/refs/noise/secure-mask, session store, snapshot CLI,
   menu-collapse. 17/20 assertions PASS live/unit; 3 (ungranted-persona) deferred.
-- **M2-action-loop** (next): CGEvent synthesis, post-action diff, act element/typing/coordinate
-  commands, wait primitives.
-- **M3-agent-surface**: ScreenCaptureKit screenshots, MCP stdio server, trajectory recording.
+- **M2-action-loop** (sealed 2026-08-06): CGEvent synthesis, post-action diff, act element/typing/
+  coordinate commands, wait primitives.
+- **M3-agent-surface** (implemented; validation in progress): ScreenCaptureKit screenshots, the MCP
+  stdio server (seven tools), and trajectory recording — the agent surface. 364 tests passing.

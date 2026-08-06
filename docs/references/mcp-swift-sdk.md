@@ -7,7 +7,8 @@
 
 - Swift 6.0+ (Xcode 16+), minimum platform macOS 13.0+ — compatible with our macOS 14 target.
 - Package product is `MCP`:
-  `.package(url: "https://github.com/modelcontextprotocol/swift-sdk.git", from: "0.12.1")` (pin exact).
+  `.package(url: "https://github.com/modelcontextprotocol/swift-sdk.git", exact: "0.12.1")`
+  (pinned exact in `Package.swift`; resolved revision `a0ae212`).
 
 ## Server shape (verified against source)
 
@@ -56,6 +57,19 @@ Key types: `Tool.inputSchema: Value` (`.null/.bool/.int/.double/.string/.array/.
 - Images must be base64-encoded strings (no `Data` convenience).
 - No tool-registration DSL: schemas are hand-written `Value` dictionaries; `CallTool` dispatch
   is a manual switch. Acceptable at our tool count (~8).
+- **Strict mode silently drops pre-initialize requests** (verified 0.12.1): `Server` strict
+  configuration throws the pre-init rejection from a receive-loop path swallowed by `try?`, so the
+  client gets NO response at all (a silent drop), not the JSON-RPC error the spec expects. Use
+  non-strict mode and gate initialization yourself in the `CallTool` handler — throw
+  `MCPError.invalidRequest`, which the SDK DOES convert into a JSON-RPC error response — so a pre-init
+  call stays observable and side-effect-free. Track `initialize` via the `server.start` completion
+  hook.
+- **Main-thread hop for run-loop-pumping APIs**: when a handler must drive an async main-actor API
+  that pumps `CFRunLoopRunInMode` itself (our ScreenCaptureKit capture), hop via
+  `CFRunLoopPerformBlock` on the main run loop — NOT `MainActor.run` / `DispatchQueue.main.async`. The
+  latter mark the main dispatch queue occupied (libdispatch reentrancy), so the nested pump never
+  drains and the capture times out. Run `RunLoop.main.run(until:)` on the main thread to service the
+  posted block; it runs from the run-loop context exactly like a plain CLI's base call stack.
 - Open issues cluster on the HTTP/OAuth side; the stdio path is comparatively stable.
 - Alternative if DX ever matters: `Cocoanetics/SwiftMCP` (`@MCPServer`/`@MCPTool` macros) —
   personal project, better ergonomics, weaker spec tracking. Not chosen.
