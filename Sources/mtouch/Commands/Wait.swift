@@ -67,12 +67,28 @@ struct Wait: ParsableCommand {
             appears: appears, disappears: disappears, text: text, valueEquals: valueEquals, of: of
         )
 
-        let outcome = WaitPipeline.run(
-            bundleId: appOptions.app,
-            condition: condition,
-            timeout: timeout.seconds,
-            interval: (interval ?? Self.defaultInterval).seconds
-        )
+        let outcome = try recorded(
+            command: "wait",
+            args: TrajectoryArgs.build([
+                "app": .string(appOptions.app),
+                "appears": appears.map(TrajectoryArgs.Value.string),
+                "disappears": disappears.map(TrajectoryArgs.Value.string),
+                "text": text.map(TrajectoryArgs.Value.string),
+                "valueEquals": valueEquals.map(TrajectoryArgs.Value.string),
+                "of": of.map(TrajectoryArgs.Value.string),
+                "timeout": .double(timeout.seconds),
+                "interval": interval.map { .double($0.seconds) },
+            ]),
+            kind: .read,
+            describe: { (outcome: WaitOutcome) in outcome.trajectoryInfo }
+        ) {
+            WaitPipeline.run(
+                bundleId: appOptions.app,
+                condition: condition,
+                timeout: timeout.seconds,
+                interval: (interval ?? Self.defaultInterval).seconds
+            )
+        }
 
         switch outcome {
         case .satisfied:

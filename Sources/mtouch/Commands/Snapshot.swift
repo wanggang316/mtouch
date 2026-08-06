@@ -18,11 +18,15 @@ struct Snapshot: ParsableCommand {
         // lives in `SnapshotPipeline` as a testable value; this command only
         // executes the outcome. A failure prints to stderr and exits non-zero,
         // never to stdout — so `--json` errors keep stdout clean.
-        let outcome = SnapshotPipeline.run(
-            bundleId: appOptions.app,
-            json: json,
-            environment: ProcessInfo.processInfo.environment
-        )
+        let environment = ProcessInfo.processInfo.environment
+        let outcome = try recorded(
+            command: "snapshot",
+            args: TrajectoryArgs.build(["app": .string(appOptions.app), "json": json ? .bool(true) : nil]),
+            kind: .snapshot,
+            describe: { (outcome: SnapshotOutcome) in outcome.trajectoryInfo }
+        ) {
+            SnapshotPipeline.run(bundleId: appOptions.app, json: json, environment: environment)
+        }
         switch outcome {
         case let .rendered(output):
             print(output)

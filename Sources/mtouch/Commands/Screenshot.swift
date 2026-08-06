@@ -32,10 +32,17 @@ struct Screenshot: ParsableCommand {
         // write) lives in `ScreenshotPipeline` as a testable value; this command
         // only executes the outcome. A failure prints to stderr and exits
         // non-zero, never leaving a file behind.
-        let outcome = ScreenshotPipeline.run(
-            window: window,
-            out: out
-        )
+        let outcome = try recorded(
+            command: "screenshot",
+            args: TrajectoryArgs.build([
+                "window": window.map(TrajectoryArgs.Value.string),
+                "out": out.map(TrajectoryArgs.Value.string),
+            ]),
+            kind: .screenshot,
+            describe: { (outcome: ScreenshotOutcome) in outcome.trajectoryInfo }
+        ) {
+            ScreenshotPipeline.run(window: window, out: out)
+        }
         switch outcome {
         case let .written(_, message):
             print(message)

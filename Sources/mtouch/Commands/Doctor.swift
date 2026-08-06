@@ -11,11 +11,27 @@ struct Doctor: ParsableCommand {
     var json = false
 
     mutating func run() throws {
-        let report = DoctorReport(provider: LivePermissionProvider())
-        if json {
-            print(report.jsonString())
-        } else {
-            print(report.textLines().joined(separator: "\n"))
+        let jsonOutput = json
+        // Doctor always produces its report (a read); the exit code reflects
+        // permission health, so the record's outcome carries it.
+        let report = try recorded(
+            command: "doctor",
+            args: TrajectoryArgs.build(["json": json ? .bool(true) : nil]),
+            kind: .read,
+            describe: { (report: DoctorReport) in
+                let code = report.exitCode
+                return TrajectoryOutcomeInfo(
+                    ok: code == .success, exit: code.rawValue, errorClass: code.trajectoryErrorClass
+                )
+            }
+        ) { () -> DoctorReport in
+            let report = DoctorReport(provider: LivePermissionProvider())
+            if jsonOutput {
+                print(report.jsonString())
+            } else {
+                print(report.textLines().joined(separator: "\n"))
+            }
+            return report
         }
         if report.exitCode != .success {
             throw ExitCode(report.exitCode.rawValue)

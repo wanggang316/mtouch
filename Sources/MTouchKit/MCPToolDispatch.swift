@@ -25,6 +25,11 @@ public struct ToolArguments: Sendable {
     /// Whether the key is present at all (any type).
     public func isPresent(_ key: String) -> Bool { values[key] != nil }
 
+    /// The raw argument values, for a cross-cutting OBSERVER (trajectory recording)
+    /// that needs to serialize what the client sent. Dispatch itself uses the typed
+    /// accessors above; this is not part of the coercion contract.
+    public var rawValues: [String: ToolArgumentValue] { values }
+
     /// The value as a string. Numbers and bools are stringified so a client that
     /// sends `window: 42` or `json: "true"` still works.
     public func string(_ key: String) -> String? {
@@ -106,6 +111,64 @@ public struct ToolResult: Equatable, Sendable {
 /// screenshot work still happens on whatever thread the caller runs it on; the MCP
 /// entry hops to the main actor first so the run loop can service it.
 public enum MCPToolDispatch {
+    /// `dispatch`, wrapped so an active `MTOUCH_TRAJECTORY` records the tool call
+    /// through the SAME `TrajectoryRecorder` (and the SAME record model) the CLI
+    /// uses — guaranteeing field-name parity across surfaces. When recording is
+    /// off, this is exactly `dispatch`. A trajectory path that is unusable surfaces
+    /// as a domain error (`isError`) rather than a silent, unrecorded success.
+    public static func dispatchRecorded(
+        tool: String,
+        arguments: ToolArguments,
+        environment: [String: String],
+        permissions: PermissionProvider = LivePermissionProvider()
+    ) -> ToolResult {
+        let kind = trajectoryKind(forTool: tool)
+        do {
+            return try TrajectoryRecorder.record(
+                command: tool,
+                args: trajectoryArgs(arguments),
+                kind: kind,
+                environment: environment,
+                operation: {
+                    dispatch(tool: tool, arguments: arguments, environment: environment, permissions: permissions)
+                },
+                describe: { $0.trajectoryInfo(kind: kind) }
+            )
+        } catch let error as TrajectoryError {
+            return .text(error.diagnostic, isError: true)
+        } catch {
+            return .text("mtouch: trajectory recording failed: \(error)", isError: true)
+        }
+    }
+
+    /// The record class for a tool: act mutates, snapshot fingerprints a tree,
+    /// screenshot writes a file, everything else (wait/apps/windows/doctor and any
+    /// unknown tool) is a read.
+    static func trajectoryKind(forTool tool: String) -> TrajectoryKind {
+        switch tool {
+        case "act": return .action
+        case "snapshot": return .snapshot
+        case "screenshot": return .screenshot
+        default: return .read
+        }
+    }
+
+    /// Serialize the tool's arguments into recorder args, preserving each value's
+    /// natural JSON type and dropping non-primitive values.
+    static func trajectoryArgs(_ arguments: ToolArguments) -> TrajectoryArgs {
+        var values: [String: TrajectoryArgs.Value] = [:]
+        for (key, value) in arguments.rawValues {
+            switch value {
+            case let .string(string): values[key] = .string(string)
+            case let .bool(bool): values[key] = .bool(bool)
+            case let .int(int): values[key] = .int(int)
+            case let .double(double): values[key] = .double(double)
+            case .other: break
+            }
+        }
+        return TrajectoryArgs(values)
+    }
+
     public static func dispatch(
         tool: String,
         arguments: ToolArguments,

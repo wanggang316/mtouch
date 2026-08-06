@@ -118,7 +118,10 @@ enum MCPServer {
             // Holding the Swift main actor (via `MainActor.run`) parks that inner task
             // and the capture never completes (times out).
             let result = await runOnMainThread {
-                MCPToolDispatch.dispatch(
+                // `dispatchRecorded` wraps `dispatch` with trajectory recording when
+                // MTOUCH_TRAJECTORY is set (a no-op otherwise), so an MCP session
+                // records each tool call under the SAME shape as the CLI.
+                MCPToolDispatch.dispatchRecorded(
                     tool: params.name,
                     arguments: arguments,
                     environment: ProcessInfo.processInfo.environment

@@ -59,6 +59,36 @@ func preflightOrExit(_ requirement: (PermissionProvider) throws -> Void,
     }
 }
 
+// MARK: - Trajectory recording
+
+/// Run `operation` under `TrajectoryRecorder`, mapping its result to a record via
+/// `describe`, and return the result UNCHANGED so the command's stdout/stderr/exit
+/// stay byte-identical whether or not `MTOUCH_TRAJECTORY` is set. An unusable
+/// trajectory path (a directory, or an uncreatable/unwritable parent) writes the
+/// pinned diagnostic to stderr and aborts with exit 1, mirroring the CLI's other
+/// fail-fast diagnostics — never a silent unrecorded run.
+func recorded<Outcome>(
+    command: String,
+    args: TrajectoryArgs,
+    kind: TrajectoryKind,
+    describe: (Outcome) -> TrajectoryOutcomeInfo,
+    _ operation: () -> Outcome
+) throws -> Outcome {
+    do {
+        return try TrajectoryRecorder.record(
+            command: command,
+            args: args,
+            kind: kind,
+            environment: ProcessInfo.processInfo.environment,
+            operation: operation,
+            describe: describe
+        )
+    } catch let error as TrajectoryError {
+        FileHandle.standardError.write(Data((error.diagnostic + "\n").utf8))
+        throw ExitCode(MTouchExitCode.runtimeFailure.rawValue)
+    }
+}
+
 // MARK: - Stub exit
 
 /// Placeholder body for subcommands whose behavior lands in later features.

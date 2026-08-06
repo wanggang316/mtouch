@@ -49,13 +49,27 @@ struct RefActionArguments: ParsableArguments {
 /// act → re-walk → diff → persist flow lives in `ActPipeline` so the coordinate
 /// and keyboard verbs (later features) reuse it.
 func runRefVerb(_ verb: ActVerb, _ arguments: RefActionArguments) throws {
-    let outcome = ActPipeline.run(
-        ref: arguments.ref,
-        verb: verb,
-        value: arguments.value,
-        json: arguments.json,
-        environment: ProcessInfo.processInfo.environment
-    )
+    let environment = ProcessInfo.processInfo.environment
+    let outcome = try recorded(
+        command: "act",
+        args: TrajectoryArgs.build([
+            "verb": .string(verb.trajectoryName),
+            "ref": .string(arguments.ref),
+            "value": arguments.value.map(TrajectoryArgs.Value.string),
+            "json": arguments.json ? .bool(true) : nil,
+            "app": arguments.appOptions.app.map(TrajectoryArgs.Value.string),
+        ]),
+        kind: .action,
+        describe: { (outcome: ActOutcome) in outcome.trajectoryInfo }
+    ) {
+        ActPipeline.run(
+            ref: arguments.ref,
+            verb: verb,
+            value: arguments.value,
+            json: arguments.json,
+            environment: environment
+        )
+    }
     switch outcome {
     case let .acted(output):
         print(output)
@@ -126,12 +140,20 @@ extension Act {
 /// (`act wiggle`) are all rejected by ArgumentParser as usage errors (exit 64)
 /// BEFORE this runs — a ref token is not a valid `x,y`, so it fails value parsing.
 func runCoordinateVerb(_ action: PointerAction, appOverride: String?, json: Bool) throws {
-    let outcome = ActPipeline.runCoordinate(
-        action: action,
-        appOverride: appOverride,
-        json: json,
-        environment: ProcessInfo.processInfo.environment
-    )
+    let environment = ProcessInfo.processInfo.environment
+    let outcome = try recorded(
+        command: "act",
+        args: coordinateArgs(action, appOverride: appOverride, json: json),
+        kind: .action,
+        describe: { (outcome: ActOutcome) in outcome.trajectoryInfo }
+    ) {
+        ActPipeline.runCoordinate(
+            action: action,
+            appOverride: appOverride,
+            json: json,
+            environment: environment
+        )
+    }
     switch outcome {
     case let .acted(output):
         print(output)
@@ -139,6 +161,30 @@ func runCoordinateVerb(_ action: PointerAction, appOverride: String?, json: Bool
         FileHandle.standardError.write(Data((stderr + "\n").utf8))
         throw ExitCode(code.rawValue)
     }
+}
+
+/// The recorded args for a coordinate verb: the verb name plus its target points
+/// (and scroll delta), mirroring the MCP `act` tool's argument vocabulary.
+private func coordinateArgs(_ action: PointerAction, appOverride: String?, json: Bool) -> TrajectoryArgs {
+    var pairs: [String: TrajectoryArgs.Value?] = [
+        "app": appOverride.map(TrajectoryArgs.Value.string),
+        "json": json ? .bool(true) : nil,
+    ]
+    switch action {
+    case let .click(point):
+        pairs["verb"] = .string("click"); pairs["at"] = .string(point.rendered)
+    case let .rightClick(point):
+        pairs["verb"] = .string("rightclick"); pairs["at"] = .string(point.rendered)
+    case let .doubleClick(point):
+        pairs["verb"] = .string("doubleclick"); pairs["at"] = .string(point.rendered)
+    case let .drag(from, to):
+        pairs["verb"] = .string("drag")
+        pairs["from"] = .string(from.rendered); pairs["to"] = .string(to.rendered)
+    case let .scroll(at, dy):
+        pairs["verb"] = .string("scroll")
+        pairs["at"] = .string(at.rendered); pairs["dy"] = .int(dy)
+    }
+    return TrajectoryArgs.build(pairs)
 }
 
 extension Act {
@@ -254,13 +300,25 @@ extension Act {
 /// outcome to stdout/stderr + exit code, mirroring `runRefVerb`. The pipeline
 /// reuses the ref verbs' back half (activate → post → re-walk → diff → persist);
 /// only the "act" step differs (keystrokes to the focused element).
-func runKeyboardVerb(_ action: KeyboardAction, appOverride: String?, json: Bool) throws {
-    let outcome = ActPipeline.runKeyboard(
-        action: action,
-        appOverride: appOverride,
-        json: json,
-        environment: ProcessInfo.processInfo.environment
-    )
+/// `args` is supplied by the caller: the `type` verb records its `text`, and the
+/// `key` verb its raw `combo` string (which the parsed `KeyCombo` does not
+/// retain). A refused/failed keyboard verb has its payload stripped by the
+/// recorder, so a secret never persists.
+func runKeyboardVerb(_ action: KeyboardAction, appOverride: String?, json: Bool, args: TrajectoryArgs) throws {
+    let environment = ProcessInfo.processInfo.environment
+    let outcome = try recorded(
+        command: "act",
+        args: args,
+        kind: .action,
+        describe: { (outcome: ActOutcome) in outcome.trajectoryInfo }
+    ) {
+        ActPipeline.runKeyboard(
+            action: action,
+            appOverride: appOverride,
+            json: json,
+            environment: environment
+        )
+    }
     switch outcome {
     case let .acted(output):
         print(output)
@@ -286,7 +344,13 @@ extension Act {
         @OptionGroup var appOptions: OptionalAppOptions
 
         mutating func run() throws {
-            try runKeyboardVerb(.type(text), appOverride: appOptions.app, json: json)
+            let args = TrajectoryArgs.build([
+                "verb": .string("type"),
+                "text": .string(text),
+                "json": json ? .bool(true) : nil,
+                "app": appOptions.app.map(TrajectoryArgs.Value.string),
+            ])
+            try runKeyboardVerb(.type(text), appOverride: appOptions.app, json: json, args: args)
         }
     }
 
@@ -314,7 +378,13 @@ extension Act {
                 FileHandle.standardError.write(Data((error.message + "\n").utf8))
                 throw ExitCode(error.exitCode.rawValue)
             }
-            try runKeyboardVerb(.key(parsed), appOverride: appOptions.app, json: json)
+            let args = TrajectoryArgs.build([
+                "verb": .string("key"),
+                "combo": .string(combo),
+                "json": json ? .bool(true) : nil,
+                "app": appOptions.app.map(TrajectoryArgs.Value.string),
+            ])
+            try runKeyboardVerb(.key(parsed), appOverride: appOptions.app, json: json, args: args)
         }
     }
 }
