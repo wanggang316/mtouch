@@ -140,31 +140,24 @@ public enum ActPipeline {
             return .failed(stderr: goneRefDiagnostic(ref), code: .refError)
         }
 
-        // Perform the action. An honest AX refusal (disabled control, non-settable
-        // value, non-focusable element) is exit 1 with no fabricated diff.
-        if case let .failure(failure) = performAction(element, verb, value) {
-            return .failed(stderr: "mtouch: \(failure.message)", code: .runtimeFailure)
-        }
-
-        // Re-walk (bounded, with a settle so a just-opened menu's items become
-        // readable), diff against the pre-action state, and carry refs across.
+        // The pre-action baseline: the walked tree carrying the session's refs so a
+        // surviving element keeps its ref in the diff. A menu-opening verb needs the
+        // longer settle so the just-opened `AXMenu`'s items become readable.
         let preSnapshot = Snapshot(roots: ScrollEnrichment.enrich(liveTree.nodes), refs: session.refs)
         let expectsMenu = verb == .showMenu
             || (verb == .press && MenuDescent.ownsSubmenu(ownerRole: entry.role))
-        let result = settledDiff(
-            pre: preSnapshot, pid: pid, expectsMenu: expectsMenu, rewalk: rewalk, sleep: sleep
-        )
-
-        // Persist the new session BEFORE printing act-able refs: an unwritable path
-        // is a failure (exit 1 naming it); we never advertise refs we could not save.
-        do {
-            try persist(result.newSnapshot, app, pid, sessionPath)
-        } catch {
-            return .failed(stderr: saveDiagnostic(error, path: sessionPath), code: .runtimeFailure)
+        return runInputVerb(
+            pid: pid, app: app, sessionPath: sessionPath,
+            preSnapshot: preSnapshot, expectsMenu: expectsMenu, json: json,
+            rewalk: rewalk, persist: persist, sleep: sleep
+        ) {
+            // Perform the action. An honest AX refusal (disabled control,
+            // non-settable value, non-focusable element) is exit 1 with no diff.
+            if case let .failure(failure) = performAction(element, verb, value) {
+                return .failed(stderr: "mtouch: \(failure.message)", code: .runtimeFailure)
+            }
+            return nil
         }
-
-        let rendered = json ? renderDiffJSON(result.diff) : renderDiffText(result.diff)
-        return .acted(rendered)
     }
 
     // MARK: - Keyboard verbs (type / key)
@@ -331,29 +324,22 @@ public enum ActPipeline {
         // keeps its ref in the diff (matching the ref verbs' pre snapshot).
         let preSnapshot = Snapshot(roots: ScrollEnrichment.enrich(preNodes), refs: refs)
 
-        // Deliver the keystrokes. Secure input active -> exit 5, ZERO events, and a
-        // payload-free diagnostic (both inherited from `SecureInputActive`).
-        do {
-            try deliver(pid, action)
-        } catch let error as SecureInputActive {
-            return .failed(stderr: error.diagnostic, code: error.exitCode)
-        } catch {
-            return .failed(stderr: "mtouch: failed to deliver keystrokes: \(error)", code: .runtimeFailure)
+        return runInputVerb(
+            pid: pid, app: app, sessionPath: sessionPath,
+            preSnapshot: preSnapshot, expectsMenu: false, json: json,
+            rewalk: rewalk, persist: persist, sleep: sleep
+        ) {
+            // Deliver the keystrokes. Secure input active -> exit 5, ZERO events,
+            // and a payload-free diagnostic (both from `SecureInputActive`).
+            do {
+                try deliver(pid, action)
+            } catch let error as SecureInputActive {
+                return .failed(stderr: error.diagnostic, code: error.exitCode)
+            } catch {
+                return .failed(stderr: "mtouch: failed to deliver keystrokes: \(error)", code: .runtimeFailure)
+            }
+            return nil
         }
-
-        // Bounded re-walk until the change appears, diff against the pre tree,
-        // persist the new session, then render.
-        let result = settledDiff(
-            pre: preSnapshot, pid: pid, expectsMenu: false, rewalk: rewalk, sleep: sleep
-        )
-        do {
-            try persist(result.newSnapshot, app, pid, sessionPath)
-        } catch {
-            return .failed(stderr: saveDiagnostic(error, path: sessionPath), code: .runtimeFailure)
-        }
-
-        let rendered = json ? renderDiffJSON(result.diff) : renderDiffText(result.diff)
-        return .acted(rendered)
     }
 
     // MARK: - Coordinate verbs (click / rightclick / doubleclick / drag / scroll)
@@ -419,19 +405,55 @@ public enum ActPipeline {
         // ref in the diff (matching the ref/keyboard verbs' pre snapshot).
         let preSnapshot = Snapshot(roots: ScrollEnrichment.enrich(preNodes), refs: refs)
 
-        // Deliver the gesture. Any delivery failure is a runtime error (exit 1).
-        do {
-            try deliver(pid, action)
-        } catch {
-            return .failed(stderr: "mtouch: failed to deliver pointer event: \(error)", code: .runtimeFailure)
+        // A right-click opens a context menu, so use the longer menu settle to let
+        // its items become walkable.
+        return runInputVerb(
+            pid: pid, app: app, sessionPath: sessionPath,
+            preSnapshot: preSnapshot, expectsMenu: action.opensMenu, json: json,
+            rewalk: rewalk, persist: persist, sleep: sleep
+        ) {
+            // Deliver the gesture. Any delivery failure is a runtime error (exit 1).
+            do {
+                try deliver(pid, action)
+            } catch {
+                return .failed(stderr: "mtouch: failed to deliver pointer event: \(error)", code: .runtimeFailure)
+            }
+            return nil
         }
+    }
+
+    // MARK: - Shared back half (act -> settle -> persist -> render)
+
+    /// The tail every `act` verb shares once its target is resolved and its
+    /// pre-action baseline (`preSnapshot`) is taken: perform the verb-specific
+    /// input, bounded-settle into a diff, persist the new session BEFORE rendering,
+    /// then render. `act` runs the input and returns a terminal failure outcome to
+    /// short-circuit (an AX refusal, secure input, a delivery error), or nil on
+    /// success — so each verb keeps its own error mapping while the settle/persist/
+    /// render invariants (persist-before-render; an unwritable path is exit 1) live
+    /// in exactly one place.
+    private static func runInputVerb(
+        pid: pid_t,
+        app: String,
+        sessionPath: String,
+        preSnapshot: Snapshot,
+        expectsMenu: Bool,
+        json: Bool,
+        rewalk: (pid_t) -> [AXNode]?,
+        persist: (Snapshot, String, pid_t, String) throws -> Void,
+        sleep: (TimeInterval) -> Void,
+        act: () -> ActOutcome?
+    ) -> ActOutcome {
+        if let failure = act() { return failure }
 
         // Bounded re-walk until the change appears, diff against the pre tree,
-        // persist the new session, then render. A right-click opens a context menu,
-        // so use the longer menu settle to let its items become walkable.
+        // persist the new session, then render.
         let result = settledDiff(
-            pre: preSnapshot, pid: pid, expectsMenu: action.opensMenu, rewalk: rewalk, sleep: sleep
+            pre: preSnapshot, pid: pid, expectsMenu: expectsMenu, rewalk: rewalk, sleep: sleep
         )
+
+        // Persist the new session BEFORE printing act-able refs: an unwritable path
+        // is a failure (exit 1 naming it); we never advertise refs we could not save.
         do {
             try persist(result.newSnapshot, app, pid, sessionPath)
         } catch {

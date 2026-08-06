@@ -36,6 +36,12 @@ public enum LiveKeyboardDelivery {
         // keystrokes land in it and not the invoking terminal (VAL-ACT-019).
         FrontmostActivation.bringToFront(pid: pid)
 
+        // `InputSynthesizer` also cooperatively activates the target per event. That
+        // inner activate is redundant after this forceful, bounded `bringToFront`
+        // (the target is already frontmost) but is left in place deliberately: it is
+        // cheap and keeps `InputSynthesizer` the single self-contained synthesis
+        // chokepoint every caller relies on, rather than splitting the activate
+        // invariant across two seams.
         let synthesizer = InputSynthesizer(targetPID: pid, secureInput: secureInput)
         switch action {
         case let .type(text):
