@@ -32,7 +32,9 @@ public enum LiveKeyboardDelivery {
         let secureInput = LiveSecureInputState()
         guard !secureInput.isSecureInputActive else { throw SecureInputActive() }
 
-        activateAndWaitFrontmost(pid: pid)
+        // Bring the target frontmost (bounded) BEFORE synthesizing, so the
+        // keystrokes land in it and not the invoking terminal (VAL-ACT-019).
+        FrontmostActivation.bringToFront(pid: pid)
 
         let synthesizer = InputSynthesizer(targetPID: pid, secureInput: secureInput)
         switch action {
@@ -41,39 +43,5 @@ public enum LiveKeyboardDelivery {
         case let .key(combo):
             try synthesizer.key(combo)
         }
-    }
-
-    /// Bring `pid` frontmost so a subsequent CGEvent lands in the target rather
-    /// than the invoking terminal (VAL-ACT-019), then hand off to the poster.
-    ///
-    /// Two mechanisms are asserted together because either alone is unreliable when
-    /// the CALLER'S app is itself frontmost (the common case — an agent invokes
-    /// mtouch from its terminal):
-    ///   - the AX `kAXFrontmostAttribute` write, honored under the Accessibility
-    ///     grant we already require even from a background process; and
-    ///   - `activate(options: .activateIgnoringOtherApps)`, the FORCEFUL activation
-    ///     (deprecated but not removed) that steals focus from a foreground app,
-    ///     which the cooperative no-argument `activate()` will not do.
-    ///
-    /// The wait is a plain wall-clock settle — deliberately NOT a run-loop pump.
-    /// Pumping THIS process's run loop dispatches workspace notifications that let
-    /// an aggressively-foreground caller re-assert itself in the gap before the
-    /// first event is posted; a bare sleep gives the activation time to land at the
-    /// window server without opening that re-grab window.
-    private static func activateAndWaitFrontmost(pid: pid_t, settle: TimeInterval = 0.2) {
-        let appElement = AXUIElementCreateApplication(pid)
-        let running = NSRunningApplication(processIdentifier: pid)
-        AXUIElementSetAttributeValue(appElement, kAXFrontmostAttribute as CFString, kCFBooleanTrue)
-        forcefullyActivate(running)
-        Thread.sleep(forTimeInterval: settle)
-    }
-
-    /// Forceful activation via the `.activateIgnoringOtherApps` option. It is
-    /// deprecated on macOS 14, but its no-argument replacement is COOPERATIVE and
-    /// will not pull focus from a foreground caller — which is exactly the scenario
-    /// keyboard delivery must handle — so the forceful variant is retained.
-    @available(macOS, deprecated: 14.0)
-    private static func forcefullyActivate(_ app: NSRunningApplication?) {
-        app?.activate(options: [.activateIgnoringOtherApps])
     }
 }

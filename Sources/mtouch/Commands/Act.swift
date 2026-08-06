@@ -115,6 +115,32 @@ extension Act {
 
 // MARK: - Coordinate-based verbs
 
+/// Executes a coordinate verb through `ActPipeline.runCoordinate` and maps its
+/// outcome to stdout/stderr + exit code, mirroring `runRefVerb`/`runKeyboardVerb`.
+/// The pipeline reuses the ref/keyboard verbs' back half (resolve target →
+/// off-screen guard → post → re-walk → diff → persist); only the "act" step
+/// differs (a mouse gesture at screen points).
+///
+/// Malformed coordinates (`--at foo,bar`), reference tokens passed to a
+/// coordinate-only verb (`drag --from e1 --to e2`, `click e1`), and unknown verbs
+/// (`act wiggle`) are all rejected by ArgumentParser as usage errors (exit 64)
+/// BEFORE this runs — a ref token is not a valid `x,y`, so it fails value parsing.
+func runCoordinateVerb(_ action: PointerAction, appOverride: String?, json: Bool) throws {
+    let outcome = ActPipeline.runCoordinate(
+        action: action,
+        appOverride: appOverride,
+        json: json,
+        environment: ProcessInfo.processInfo.environment
+    )
+    switch outcome {
+    case let .acted(output):
+        print(output)
+    case let .failed(stderr, code):
+        FileHandle.standardError.write(Data((stderr + "\n").utf8))
+        throw ExitCode(code.rawValue)
+    }
+}
+
 extension Act {
     struct Click: ParsableCommand {
         static let configuration = CommandConfiguration(
@@ -125,9 +151,14 @@ extension Act {
         @Option(help: ArgumentHelp("Screen coordinate to click.", valueName: "x,y"))
         var at: ScreenPoint
 
+        @Flag(help: "Emit the resulting diff as machine-readable JSON.")
+        var json = false
+
         @OptionGroup var appOptions: OptionalAppOptions
 
-        mutating func run() throws { stubExit("act click") }
+        mutating func run() throws {
+            try runCoordinateVerb(.click(at), appOverride: appOptions.app, json: json)
+        }
     }
 
     struct RightClick: ParsableCommand {
@@ -139,9 +170,14 @@ extension Act {
         @Option(help: ArgumentHelp("Screen coordinate to right-click.", valueName: "x,y"))
         var at: ScreenPoint
 
+        @Flag(help: "Emit the resulting diff as machine-readable JSON.")
+        var json = false
+
         @OptionGroup var appOptions: OptionalAppOptions
 
-        mutating func run() throws { stubExit("act rightclick") }
+        mutating func run() throws {
+            try runCoordinateVerb(.rightClick(at), appOverride: appOptions.app, json: json)
+        }
     }
 
     struct DoubleClick: ParsableCommand {
@@ -153,9 +189,14 @@ extension Act {
         @Option(help: ArgumentHelp("Screen coordinate to double-click.", valueName: "x,y"))
         var at: ScreenPoint
 
+        @Flag(help: "Emit the resulting diff as machine-readable JSON.")
+        var json = false
+
         @OptionGroup var appOptions: OptionalAppOptions
 
-        mutating func run() throws { stubExit("act doubleclick") }
+        mutating func run() throws {
+            try runCoordinateVerb(.doubleClick(at), appOverride: appOptions.app, json: json)
+        }
     }
 
     struct Drag: ParsableCommand {
@@ -170,9 +211,14 @@ extension Act {
         @Option(help: ArgumentHelp("Ending screen coordinate.", valueName: "x,y"))
         var to: ScreenPoint
 
+        @Flag(help: "Emit the resulting diff as machine-readable JSON.")
+        var json = false
+
         @OptionGroup var appOptions: OptionalAppOptions
 
-        mutating func run() throws { stubExit("act drag") }
+        mutating func run() throws {
+            try runCoordinateVerb(.drag(from: from, to: to), appOverride: appOptions.app, json: json)
+        }
     }
 
     struct Scroll: ParsableCommand {
@@ -184,12 +230,21 @@ extension Act {
         @Option(help: ArgumentHelp("Screen coordinate to scroll at.", valueName: "x,y"))
         var at: ScreenPoint
 
-        @Option(help: ArgumentHelp("Vertical scroll delta.", valueName: "n"))
+        // `.unconditional` so a negative delta (`--dy -300`) is taken as the value
+        // rather than parsed as an option/flag — the documented idiom for a
+        // dash-prefixed numeric argument. Positive `--dy` scrolls content up.
+        @Option(parsing: .unconditional,
+                help: ArgumentHelp("Vertical scroll delta (positive scrolls content up).", valueName: "n"))
         var dy: Int
+
+        @Flag(help: "Emit the resulting diff as machine-readable JSON.")
+        var json = false
 
         @OptionGroup var appOptions: OptionalAppOptions
 
-        mutating func run() throws { stubExit("act scroll") }
+        mutating func run() throws {
+            try runCoordinateVerb(.scroll(at: at, dy: dy), appOverride: appOptions.app, json: json)
+        }
     }
 }
 

@@ -169,24 +169,62 @@ public enum ActPipeline {
 
     // MARK: - Keyboard verbs (type / key)
 
-    /// The resolved keyboard target, or a terminal outcome returned as-is. Split
-    /// out (like `resolveTarget`) so the permission-before-target precedence is
-    /// exercisable without any AX access.
+    /// The resolved app target, or a terminal outcome returned as-is. Shared by the
+    /// keyboard AND coordinate verbs (both act on "the session's app, or --app").
+    /// Split out (like `resolveTarget`) so the permission-before-target precedence
+    /// is exercisable without any AX access.
     enum KeyboardTarget {
         case resolved(pid: pid_t, app: String, refs: [String: RefEntry], sessionPath: String)
         case terminal(ActOutcome)
     }
 
     /// Resolve the app a keyboard verb targets: the explicit `--app`, else the
-    /// current session's app. The permission gate (exit 2) is checked FIRST so it
-    /// precedes every session/app resolution (pinned precedence 64 → 2 → 3 → 1;
-    /// the usage-64 combo-parse for `key` happens in the CLI before this).
+    /// current session's app. Delegates to the shared resolver with the keyboard
+    /// no-target diagnostic ("no app to type into").
     static func resolveKeyboardTarget(
         appOverride: String?,
         environment: [String: String],
         permissions: PermissionProvider,
         loadSession: (String) -> Session?,
         resolvePID: (String) throws -> pid_t
+    ) -> KeyboardTarget {
+        resolveAppTarget(
+            appOverride: appOverride, environment: environment, permissions: permissions,
+            loadSession: loadSession, resolvePID: resolvePID,
+            noTargetDiagnostic: noKeyboardTargetDiagnostic
+        )
+    }
+
+    /// Resolve the app a coordinate verb targets: the explicit `--app`, else the
+    /// current session's app. Same resolution as the keyboard verbs (so the pinned
+    /// precedence is identical); only the exit-3 no-target message differs ("no app
+    /// to act on").
+    static func resolveCoordinateTarget(
+        appOverride: String?,
+        environment: [String: String],
+        permissions: PermissionProvider,
+        loadSession: (String) -> Session?,
+        resolvePID: (String) throws -> pid_t
+    ) -> KeyboardTarget {
+        resolveAppTarget(
+            appOverride: appOverride, environment: environment, permissions: permissions,
+            loadSession: loadSession, resolvePID: resolvePID,
+            noTargetDiagnostic: noCoordinateTargetDiagnostic
+        )
+    }
+
+    /// Shared app-target resolution for the keyboard AND coordinate verbs. The
+    /// permission gate (exit 2) is checked FIRST so it precedes every session/app
+    /// resolution (pinned precedence 64 → 2 → 3 → 1; the usage-64 arg parse happens
+    /// in the CLI before this). `noTargetDiagnostic` supplies the verb-appropriate
+    /// exit-3 message for the "no session and no --app" case.
+    private static func resolveAppTarget(
+        appOverride: String?,
+        environment: [String: String],
+        permissions: PermissionProvider,
+        loadSession: (String) -> Session?,
+        resolvePID: (String) throws -> pid_t,
+        noTargetDiagnostic: () -> String
     ) -> KeyboardTarget {
         // Permission (exit 2): fail fast with the doctor-pointing diagnostic,
         // BEFORE resolving the session or the target app.
@@ -202,8 +240,8 @@ public enum ActPipeline {
 
         // Explicit `--app` selects the target directly. When it names the SAME
         // running app as the session, the session refs still describe that tree, so
-        // carry them (the focused element keeps its ref in the diff); otherwise the
-        // session (if any) describes a different app, so number the diff afresh.
+        // carry them (a survivor keeps its ref in the diff); otherwise the session
+        // (if any) describes a different app, so number the diff afresh.
         if let appOverride {
             let pid: pid_t
             do {
@@ -224,9 +262,9 @@ public enum ActPipeline {
         }
 
         // No override: the session's app is the target. Without a session there is
-        // no target to type into — exit 3, advising a snapshot (or an explicit --app).
+        // no target to act on — exit 3, advising a snapshot (or an explicit --app).
         guard let session else {
-            return .terminal(.failed(stderr: noKeyboardTargetDiagnostic(), code: .refError))
+            return .terminal(.failed(stderr: noTargetDiagnostic(), code: .refError))
         }
         return .resolved(pid: session.pid, app: session.app, refs: session.refs, sessionPath: sessionPath)
     }
@@ -318,6 +356,92 @@ public enum ActPipeline {
         return .acted(rendered)
     }
 
+    // MARK: - Coordinate verbs (click / rightclick / doubleclick / drag / scroll)
+
+    /// Compose a coordinate `act` verb end-to-end, reusing the SAME back half as
+    /// the ref and keyboard verbs (pre-walk → act → bounded settle → diff →
+    /// persist). The only differences are the "act" step — a mouse gesture at
+    /// screen points delivered via `deliver` (activate + post) — and an off-screen
+    /// guard: any target point outside every display is rejected (exit 1) BEFORE a
+    /// single event is posted, so a bad coordinate never delivers input anywhere.
+    public static func runCoordinate(
+        action: PointerAction,
+        appOverride: String?,
+        json: Bool,
+        environment: [String: String],
+        permissions: PermissionProvider = LivePermissionProvider(),
+        loadSession: (String) -> Session? = { SessionStore.load(from: $0) },
+        resolvePID: (String) throws -> pid_t = { try AXWindowEnumerator.resolveRunningPID(bundleId: $0) },
+        isRunning: (pid_t, String) -> Bool = { ActProcess.isRunning(pid: $0, bundleId: $1) },
+        onScreen: (ScreenPoint) -> Bool = { ScreenBounds.isOnScreen($0) },
+        rewalk: (pid_t) -> [AXNode]? = { pid in BoundedWalk.run { AXTreeWalker.walk(pid: pid).nodes } },
+        deliver: (pid_t, PointerAction) throws -> Void = { pid, action in
+            LivePointerDelivery.deliver(pid: pid, action: action)
+        },
+        persist: (Snapshot, String, pid_t, String) throws -> Void = { snapshot, app, pid, path in
+            try SessionStore.save(snapshot, app: app, pid: pid, to: path)
+        },
+        sleep: (TimeInterval) -> Void = { Thread.sleep(forTimeInterval: $0) }
+    ) -> ActOutcome {
+        let pid: pid_t
+        let app: String
+        let refs: [String: RefEntry]
+        let sessionPath: String
+        switch resolveCoordinateTarget(
+            appOverride: appOverride, environment: environment,
+            permissions: permissions, loadSession: loadSession, resolvePID: resolvePID
+        ) {
+        case let .terminal(outcome):
+            return outcome
+        case let .resolved(resolvedPID, resolvedApp, resolvedRefs, path):
+            pid = resolvedPID
+            app = resolvedApp
+            refs = resolvedRefs
+            sessionPath = path
+        }
+
+        // Off-screen (exit 1): validate EVERY target point before touching the live
+        // process or posting anything, so a bad coordinate delivers zero events.
+        for point in action.points where !onScreen(point) {
+            return .failed(stderr: offScreenDiagnostic(point), code: .runtimeFailure)
+        }
+
+        // Runtime (exit 1): the target process is gone.
+        guard isRunning(pid, app) else {
+            return .failed(stderr: notRunningDiagnostic(app: app, pid: pid), code: .runtimeFailure)
+        }
+
+        // Pre-action walk for the diff baseline. A wedged target -> bounded exit 1.
+        guard let preNodes = rewalk(pid) else {
+            return .failed(stderr: timeoutDiagnostic(app: app, pid: pid), code: .runtimeFailure)
+        }
+        // Carry the session's refs onto the pre tree so a changed element keeps its
+        // ref in the diff (matching the ref/keyboard verbs' pre snapshot).
+        let preSnapshot = Snapshot(roots: ScrollEnrichment.enrich(preNodes), refs: refs)
+
+        // Deliver the gesture. Any delivery failure is a runtime error (exit 1).
+        do {
+            try deliver(pid, action)
+        } catch {
+            return .failed(stderr: "mtouch: failed to deliver pointer event: \(error)", code: .runtimeFailure)
+        }
+
+        // Bounded re-walk until the change appears, diff against the pre tree,
+        // persist the new session, then render. A right-click opens a context menu,
+        // so use the longer menu settle to let its items become walkable.
+        let result = settledDiff(
+            pre: preSnapshot, pid: pid, expectsMenu: action.opensMenu, rewalk: rewalk, sleep: sleep
+        )
+        do {
+            try persist(result.newSnapshot, app, pid, sessionPath)
+        } catch {
+            return .failed(stderr: saveDiagnostic(error, path: sessionPath), code: .runtimeFailure)
+        }
+
+        let rendered = json ? renderDiffJSON(result.diff) : renderDiffText(result.diff)
+        return .acted(rendered)
+    }
+
     // MARK: - Post-action settle
 
     /// Re-walk and diff until the action's effect is visible or the budget is
@@ -374,6 +498,16 @@ public enum ActPipeline {
     static func noKeyboardTargetDiagnostic() -> String {
         "mtouch: no active snapshot session, so there is no app to type into. "
             + "Run 'mtouch snapshot --app <bundleId>' first, or pass '--app <bundleId>'."
+    }
+
+    static func noCoordinateTargetDiagnostic() -> String {
+        "mtouch: no active snapshot session, so there is no app to act on. "
+            + "Run 'mtouch snapshot --app <bundleId>' first, or pass '--app <bundleId>'."
+    }
+
+    static func offScreenDiagnostic(_ point: ScreenPoint) -> String {
+        "mtouch: coordinate (\(JSONText.number(point.x)),\(JSONText.number(point.y))) is outside every display; "
+            + "no event was delivered. Re-derive coordinates from a fresh 'mtouch snapshot'."
     }
 
     static func notRunningDiagnostic(app: String, pid: pid_t) -> String {
