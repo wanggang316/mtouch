@@ -1,0 +1,6 @@
+.build/
+.swiftpm/
+.harness-runtime/
+tests/runs/
+tests/**/*.png
+.DS_Store
