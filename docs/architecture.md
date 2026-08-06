@@ -37,14 +37,38 @@ The diff engine (M2), wait evaluator (M2), and act layer (M2) all consume `AXNod
   the owner menu-bar/menu item stays actionable. Perception matches the action model — items appear
   only after `act show-menu` opens the menu (frame becomes non-zero → walked).
 - **Bounded walk** (`BoundedWalk`): an 8s wall-clock deadline turns a hung/SIGSTOPped target into an
-  explicit exit-1 timeout, never an indefinite hang. NOTE: it abandons (not cancels) the walk thread;
-  M2 `wait` (polling) and M3 `mcp` (long-running) must make it cancellable to avoid thread leaks.
+  explicit exit-1 timeout, never an indefinite hang. It abandons (not cancels) the walk thread, so
+  M2 `wait` polls through `GuardedWalk` — a single-flight cap that keeps at most ONE walk in flight on
+  a hung target (never one leaked thread per poll); M3 `mcp` (long-running) reuses the same guard.
 - **Secret-safety** (`SnapshotSecure`): secure-text-field values are masked at a single chokepoint on
   every surface (text, JSON) and the persisted ref table (`RefEntry`) carries no value at all; the
   session digest hashes already-masked JSON. A planted secret cannot reach any output or the state file.
 - **Session store** (`SessionStore`): current snapshot (ref table + digest) persisted to
   `~/.mtouch/session.json` (or `$MTOUCH_SESSION`), atomic temp+rename write; corrupt→absent;
   `RefResolution` = resolved/stale/unknown/noSession → CLI exit 0/3/64/3.
+
+## Seams & patterns (established M2-action-loop)
+
+- **Input synthesis chokepoint** (`InputSynthesizer` over `Activator` / `SecureInputState` /
+  `EventPoster`): the single place every keyboard/mouse `CGEvent` is built and posted. Keyboard verbs
+  refuse when secure input is active BEFORE activating or posting (zero events, payload-free diagnostic
+  → exit 5); the target app is always activated before any event. `KeyCombo(parsing:)` is the only
+  key-name interpreter (unknown names → usage error 64).
+- **Unified act pipeline** (`ActPipeline`): ref, keyboard, and coordinate verbs share one back half —
+  resolve target → (ref only: re-locate by hint, never a positional impostor) → act → bounded
+  early-stopping settle re-walk → `DiffEngine` diff → persist the reconciled session. Precedence
+  64 → 2 → 3 → 1 is encoded by order in an AX-free front half; a rejected case delivers zero events.
+  Coordinate verbs add an off-screen guard (`ScreenBounds` / `CGDisplayBounds`) validated before any
+  event is posted.
+- **Post-action diff** (`DiffEngine`): identity = role + structural PATH; title/value/enabled/frame
+  are changeable attributes; matched nodes keep their ref, added actionable nodes get fresh continuing
+  refs, removed refs go stale; digest reuses the single `Session.digest` scheme. KNOWN LIMITATION:
+  positional identity does not re-pair a node that shifted to a new path — a root insert/remove (e.g. a
+  window close while the menu bar is a sibling root) reads as remove+re-add of the shifted subtrees
+  rather than a minimal removal. A role+title cross-path fallback is the pending fix.
+- **Guarded poll** (`WaitPoll` + `GuardedWalk`): `wait` observes only (never delivers input), checks
+  before sleeping (already-true returns fast), fails only at ≥ timeout, does exactly one check at
+  `--timeout 0`, and never leaks threads on a hung target.
 
 ## Interfaces (pinned; authority = plan.md "Interface semantics")
 
