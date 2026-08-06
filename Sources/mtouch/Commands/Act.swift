@@ -1,4 +1,5 @@
 import ArgumentParser
+import Foundation
 import MTouchKit
 
 struct Act: ParsableCommand {
@@ -29,7 +30,7 @@ struct Act: ParsableCommand {
 // MARK: - Shared argument shapes
 
 /// Positional grammar shared by the ref-based verbs: `<ref> [<value>]`.
-/// Only set-value consumes `<value>`; semantics land in later features.
+/// Only set-value consumes `<value>`.
 struct RefActionArguments: ParsableArguments {
     @Argument(help: ArgumentHelp("Element reference from a prior snapshot.", valueName: "ref"))
     var ref: String
@@ -37,7 +38,31 @@ struct RefActionArguments: ParsableArguments {
     @Argument(help: ArgumentHelp("Optional value payload (used by set-value).", valueName: "value"))
     var value: String?
 
+    @Flag(help: "Emit the resulting diff as machine-readable JSON.")
+    var json = false
+
     @OptionGroup var appOptions: OptionalAppOptions
+}
+
+/// Executes a ref-based verb through `ActPipeline` and maps its outcome to
+/// stdout/stderr + exit code. The CLI layer stays thin: the resolve → re-locate →
+/// act → re-walk → diff → persist flow lives in `ActPipeline` so the coordinate
+/// and keyboard verbs (later features) reuse it.
+func runRefVerb(_ verb: ActVerb, _ arguments: RefActionArguments) throws {
+    let outcome = ActPipeline.run(
+        ref: arguments.ref,
+        verb: verb,
+        value: arguments.value,
+        json: arguments.json,
+        environment: ProcessInfo.processInfo.environment
+    )
+    switch outcome {
+    case let .acted(output):
+        print(output)
+    case let .failed(stderr, code):
+        FileHandle.standardError.write(Data((stderr + "\n").utf8))
+        throw ExitCode(code.rawValue)
+    }
 }
 
 // MARK: - Ref-based verbs
@@ -51,7 +76,7 @@ extension Act {
 
         @OptionGroup var arguments: RefActionArguments
 
-        mutating func run() throws { stubExit("act press") }
+        mutating func run() throws { try runRefVerb(.press, arguments) }
     }
 
     struct Focus: ParsableCommand {
@@ -62,18 +87,18 @@ extension Act {
 
         @OptionGroup var arguments: RefActionArguments
 
-        mutating func run() throws { stubExit("act focus") }
+        mutating func run() throws { try runRefVerb(.focus, arguments) }
     }
 
     struct ShowMenu: ParsableCommand {
         static let configuration = CommandConfiguration(
             commandName: "show-menu",
-            abstract: "Open the contextual menu of the referenced element."
+            abstract: "Open the menu of the referenced element."
         )
 
         @OptionGroup var arguments: RefActionArguments
 
-        mutating func run() throws { stubExit("act show-menu") }
+        mutating func run() throws { try runRefVerb(.showMenu, arguments) }
     }
 
     struct SetValue: ParsableCommand {
@@ -84,7 +109,7 @@ extension Act {
 
         @OptionGroup var arguments: RefActionArguments
 
-        mutating func run() throws { stubExit("act set-value") }
+        mutating func run() throws { try runRefVerb(.setValue, arguments) }
     }
 }
 

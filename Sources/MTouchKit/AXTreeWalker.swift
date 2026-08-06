@@ -88,7 +88,12 @@ public enum AXTreeWalker {
     /// exposes only what an agent can currently act on (see `MenuDescent`). The
     /// extra child read is gated to menu owners, so the rest of the tree is
     /// untouched.
-    private static func descendableChildren<Provider: AXTreeProvider>(
+    ///
+    /// Internal (not private) so the act layer's handle-retaining walk
+    /// (`LiveElementTree`) indexes children in the EXACT same order the snapshot
+    /// used to assign ref paths — otherwise a ref's structural path would not line
+    /// up with the live element at re-location time.
+    static func descendableChildren<Provider: AXTreeProvider>(
         provider: Provider,
         ownerRole: String,
         of element: Provider.Element
