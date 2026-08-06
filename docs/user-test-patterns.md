@@ -168,4 +168,7 @@ Author-time conventions (tooling, selectors, isolation) stay in the sections abo
 - [YYYY-MM-DD] <surface / step>: <fact discovered>. <what to do next time>.
 ```
 
-(None yet)
+- [2026-08-06] TextEdit readiness: snapshotting a TextEdit instance in its first ~1–2s after `open -na` (still restoring/creating windows) can hit mtouch's 8s bounded-timeout (exit 1, "appears unresponsive"). Gate readiness on `mtouch windows` returning a window (or a bounded snapshot-retry ≤10×/500ms), NOT an immediate snapshot; expect a possible one-off bounded-timeout if you snapshot mid-launch.
+- [2026-08-06] Multi-instance TextEdit: `open -na TextEdit` spawns a NEW process each time; `mtouch --app com.apple.TextEdit` resolves to ONE of them nondeterministically. For SIGSTOP/timeout probes, ensure a single instance so the one you STOP is the resolve target. Clean the slate with `pkill -9 -x TextEdit` before a controlled run (only ever our own test instances).
+- [2026-08-06] TCC grants attach to the INVOKING TERMINAL app, not the mtouch binary — a binary copy at a fresh path is still granted. The `unprivileged_operator` persona is therefore unrealizable from a granted terminal without forbidden TCC mutation; assertions requiring it are BLOCKED here and must be re-probed from a never-granted host app / CI runner. Ungranted code paths are covered by unit filters (declared evidence for VAL-ENV-006; DoctorReport covers all four grant combos).
+- [2026-08-06] `mtouch screenshot` was "not implemented" until M3; for a no-dialog check pre-M3, the system `screencapture` stands in.
