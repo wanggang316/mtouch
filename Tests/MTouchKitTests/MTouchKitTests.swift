@@ -38,12 +38,30 @@ import Testing
 }
 
 @Suite struct WaitDurationTests {
-    @Test func parsesPlainSeconds() {
+    @Test func parsesBareSecondsForBackCompat() {
         #expect(WaitDuration(parsing: "5") == WaitDuration(seconds: 5))
         #expect(WaitDuration(parsing: "2.5") == WaitDuration(seconds: 2.5))
+        #expect(WaitDuration(parsing: "0") == WaitDuration(seconds: 0))
     }
 
-    @Test(arguments: ["", "-1", "abc", "5s"])
+    @Test func parsesSecondsSuffix() {
+        #expect(WaitDuration(parsing: "5s") == WaitDuration(seconds: 5))
+        #expect(WaitDuration(parsing: "2s") == WaitDuration(seconds: 2))
+        #expect(WaitDuration(parsing: "0.5s") == WaitDuration(seconds: 0.5))
+    }
+
+    @Test func parsesMillisecondsSuffix() {
+        #expect(WaitDuration(parsing: "500ms") == WaitDuration(seconds: 0.5))
+        #expect(WaitDuration(parsing: "100ms") == WaitDuration(seconds: 0.1))
+        #expect(WaitDuration(parsing: "0ms") == WaitDuration(seconds: 0))
+    }
+
+    @Test func toleratesWhitespaceAndCase() {
+        #expect(WaitDuration(parsing: " 5S ") == WaitDuration(seconds: 5))
+        #expect(WaitDuration(parsing: "250MS") == WaitDuration(seconds: 0.25))
+    }
+
+    @Test(arguments: ["", "-1", "-1s", "abc", "5sx", "s", "ms", "5 s", "1.2.3"])
     func rejectsMalformedInput(_ input: String) {
         #expect(WaitDuration(parsing: input) == nil)
     }

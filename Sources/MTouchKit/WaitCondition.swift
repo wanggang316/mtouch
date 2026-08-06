@@ -1,0 +1,163 @@
+import Foundation
+
+/// A wait CRITERIA: an accessibility role, optionally narrowed by a quoted
+/// substring matched over an element's title+value.
+///
+/// The grammar is `<role> ["<substring>"]`, e.g. `textarea` or `button "Save"`.
+/// Friendly role names map to AX roles (`textarea` → `AXTextArea`); a raw AX
+/// role (`AXButton`) passes through unchanged; anything else is used LITERALLY.
+/// A misspelled/non-matching role is therefore NOT a usage error — it simply
+/// never matches, so the wait times out (exit 4) rather than failing to parse.
+public struct WaitCriteria: Equatable, Sendable {
+    /// Resolved AX role matched literally against `AXNode.role`.
+    public let role: String
+    /// Optional substring required within an element's title or value; nil means
+    /// role alone is enough.
+    public let substring: String?
+
+    public init(role: String, substring: String? = nil) {
+        self.role = role
+        self.substring = substring
+    }
+
+    /// Parses `<role> ["<substring>"]`. Tolerant by design (see the type doc): an
+    /// unknown role is kept verbatim, never rejected. The first `"..."` pair is
+    /// taken as the substring; the text before it is the role.
+    public init(parsing raw: String) {
+        let trimmed = raw.trimmingCharacters(in: .whitespaces)
+        if let open = trimmed.firstIndex(of: "\""),
+           let close = trimmed[trimmed.index(after: open)...].firstIndex(of: "\"") {
+            let rolePart = String(trimmed[..<open]).trimmingCharacters(in: .whitespaces)
+            self.role = WaitCriteria.resolveRole(rolePart)
+            self.substring = String(trimmed[trimmed.index(after: open)..<close])
+        } else {
+            self.role = WaitCriteria.resolveRole(trimmed)
+            self.substring = nil
+        }
+    }
+
+    /// Human-readable form for diagnostics, echoing the criteria as given.
+    public var description: String {
+        if let substring { return "\(role) \"\(substring)\"" }
+        return role
+    }
+
+    /// Friendly role name → AX role. Covers the roles an agent is likely to name;
+    /// the raw AX role is always also accepted (see `resolveRole`). Keys are
+    /// lowercased for a case-insensitive lookup.
+    static let friendlyRoles: [String: String] = [
+        "textarea": "AXTextArea",
+        "textfield": "AXTextField",
+        "button": "AXButton",
+        "window": "AXWindow",
+        "sheet": "AXSheet",
+        "menu": "AXMenu",
+        "menuitem": "AXMenuItem",
+        "menubar": "AXMenuBar",
+        "menubaritem": "AXMenuBarItem",
+        "checkbox": "AXCheckBox",
+        "radiobutton": "AXRadioButton",
+        "popupbutton": "AXPopUpButton",
+        "combobox": "AXComboBox",
+        "statictext": "AXStaticText",
+        "group": "AXGroup",
+        "image": "AXImage",
+        "link": "AXLink",
+        "slider": "AXSlider",
+        "toolbar": "AXToolbar",
+        "scrollarea": "AXScrollArea",
+        "tabgroup": "AXTabGroup",
+        "list": "AXList",
+        "row": "AXRow",
+        "cell": "AXCell",
+        "table": "AXTable",
+        "outline": "AXOutline",
+    ]
+
+    /// Resolve a role token: a raw `AX…` role passes through; a known friendly
+    /// name maps to its AX role; anything else is returned verbatim (matched
+    /// literally, so a typo simply never matches).
+    static func resolveRole(_ token: String) -> String {
+        if token.hasPrefix("AX") { return token }
+        return friendlyRoles[token.lowercased()] ?? token
+    }
+}
+
+/// The single condition a `wait` invocation polls for. Exactly one is selected
+/// from the pinned condition flags (see `WaitGrammar`).
+public enum WaitCondition: Equatable, Sendable {
+    /// Succeed once ≥1 element matches the criteria.
+    case appears(WaitCriteria)
+    /// Succeed once NO element matches the criteria (vacuously true if none ever
+    /// matched).
+    case disappears(WaitCriteria)
+    /// Succeed once the substring appears in ANY element's title or value
+    /// (window titles included).
+    case text(String)
+    /// Succeed once an element's value EQUALS the string (unicode-normalization
+    /// insensitive). `of` restricts the search to elements matching a criteria.
+    case valueEquals(String, of: WaitCriteria?)
+
+    /// Human-readable phrasing for the timeout diagnostic.
+    public var description: String {
+        switch self {
+        case let .appears(criteria):
+            return "an element matching \(criteria.description) to appear"
+        case let .disappears(criteria):
+            return "an element matching \(criteria.description) to disappear"
+        case let .text(string):
+            return "the text \"\(string)\" to appear"
+        case let .valueEquals(string, criteria):
+            if let criteria {
+                return "an element matching \(criteria.description) whose value equals \"\(string)\""
+            }
+            return "an element whose value equals \"\(string)\""
+        }
+    }
+}
+
+/// Pure predicate layer: evaluates a `WaitCondition` against a walked tree with
+/// NO AX/TCC access, so every condition is unit-testable with literal `AXNode`
+/// fixtures.
+public enum WaitEvaluator {
+    /// Whether `condition` holds over the given root nodes (windows + menu bar).
+    public static func evaluate(_ condition: WaitCondition, in roots: [AXNode]) -> Bool {
+        let all = roots.flatMap(\.flattened)
+        switch condition {
+        case let .appears(criteria):
+            return all.contains { matches($0, criteria) }
+        case let .disappears(criteria):
+            return !all.contains { matches($0, criteria) }
+        case let .text(string):
+            return all.contains { textContains($0, string) }
+        case let .valueEquals(string, criteria):
+            let target = normalized(string)
+            return all.contains { node in
+                if let criteria, !matches(node, criteria) { return false }
+                guard let value = node.value else { return false }
+                return normalized(value) == target
+            }
+        }
+    }
+
+    /// Whether a node satisfies a criteria: role matched literally, and — when a
+    /// substring is given — that substring present in the title or value.
+    static func matches(_ node: AXNode, _ criteria: WaitCriteria) -> Bool {
+        guard node.role == criteria.role else { return false }
+        guard let substring = criteria.substring else { return true }
+        return textContains(node, substring)
+    }
+
+    /// Whether the substring appears in a node's title or value.
+    static func textContains(_ node: AXNode, _ substring: String) -> Bool {
+        if let title = node.title, title.contains(substring) { return true }
+        if let value = node.value, value.contains(substring) { return true }
+        return false
+    }
+
+    /// NFC-fold so canonically equivalent strings (e.g. precomposed "é" vs the
+    /// decomposed "e" + combining accent) compare equal for `--value-equals`.
+    static func normalized(_ string: String) -> String {
+        string.precomposedStringWithCanonicalMapping
+    }
+}
