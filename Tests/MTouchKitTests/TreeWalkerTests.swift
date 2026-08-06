@@ -87,6 +87,31 @@ private func blankWindow() -> AXNode {
     )
 }
 
+private func menuItem(_ title: String) -> AXNode {
+    AXNode(role: kAXMenuItemRole, title: title, actionable: true)
+}
+
+/// A menu-bar item that owns a submenu. `menuFrame` decides the submenu's
+/// displayed state: a zero-size frame is the closed (off-screen) form macOS
+/// reports for an unopened menu; a real on-screen frame is the opened form.
+private func menuBarItem(_ title: String, menuFrame: CGRect) -> AXNode {
+    AXNode(
+        role: kAXMenuBarItemRole,
+        title: title,
+        actionable: true,
+        children: [
+            AXNode(
+                role: kAXMenuRole,
+                frame: menuFrame,
+                children: [menuItem("New"), menuItem("Open")]
+            ),
+        ]
+    )
+}
+
+private let closedSubmenuFrame = CGRect(x: 0, y: 1080, width: 0, height: 0)
+private let openSubmenuFrame = CGRect(x: 116, y: 30, width: 200, height: 400)
+
 // MARK: - Walker behavior
 
 @Suite struct TreeWalkerTests {
@@ -148,8 +173,76 @@ private func blankWindow() -> AXNode {
         #expect(depth <= AXTreeWalker.maxDepth)
     }
 
+    @Test func closedSubmenuIsNotExpandedButOwnerSurvives() {
+        // A menu-bar item owning a CLOSED (zero-size, off-screen) submenu: the
+        // owner stays and stays actionable, but its hidden items are not walked.
+        let menuBar = AXNode(
+            role: kAXMenuBarRole,
+            children: [menuBarItem("File", menuFrame: closedSubmenuFrame)]
+        )
+        let provider = FakeTreeProvider(before: [menuBar])
+
+        let result = AXTreeWalker.walk(provider: provider)
+
+        let file = result.nodes[0].children[0]
+        #expect(file.role == kAXMenuBarItemRole)
+        #expect(file.title == "File")
+        #expect(file.actionable == true)
+        // The closed AXMenu (and its items) are dropped: the owner is a leaf.
+        #expect(file.children.isEmpty)
+        #expect(!result.nodes.flatMap(\.flattened).contains { $0.role == kAXMenuItemRole })
+    }
+
+    @Test func openMenuStillExposesItsItems() {
+        // Once a menu is opened it has a real on-screen frame; its items MUST
+        // still be walked (the M2 `act show-menu` path must not be broken).
+        let menuBar = AXNode(
+            role: kAXMenuBarRole,
+            children: [menuBarItem("File", menuFrame: openSubmenuFrame)]
+        )
+        let provider = FakeTreeProvider(before: [menuBar])
+
+        let result = AXTreeWalker.walk(provider: provider)
+
+        let file = result.nodes[0].children[0]
+        #expect(file.children.count == 1)
+        let menu = file.children[0]
+        #expect(menu.role == kAXMenuRole)
+        #expect(menu.children.map(\.title) == ["New", "Open"])
+    }
+
     private func maxDepthOf(_ node: AXNode) -> Int {
         1 + (node.children.map(maxDepthOf).max() ?? -1)
+    }
+}
+
+// MARK: - Menu-descent predicate
+
+@Suite struct MenuDescentTests {
+    @Test func menuBarItemsAndMenuItemsOwnSubmenus() {
+        #expect(MenuDescent.ownsSubmenu(ownerRole: kAXMenuBarItemRole))
+        #expect(MenuDescent.ownsSubmenu(ownerRole: kAXMenuItemRole))
+        #expect(!MenuDescent.ownsSubmenu(ownerRole: kAXWindowRole))
+        #expect(!MenuDescent.ownsSubmenu(ownerRole: kAXMenuRole))
+    }
+
+    @Test func zeroSizeOrMissingFrameMenuIsClosed() {
+        #expect(MenuDescent.isClosedSubmenu(AXAttributes(role: kAXMenuRole, frame: closedSubmenuFrame)))
+        #expect(MenuDescent.isClosedSubmenu(AXAttributes(role: kAXMenuRole, frame: nil)))
+        #expect(MenuDescent.isClosedSubmenu(
+            AXAttributes(role: kAXMenuRole, frame: CGRect(x: 0, y: 0, width: 200, height: 0))
+        ))
+    }
+
+    @Test func onScreenMenuIsOpen() {
+        #expect(!MenuDescent.isClosedSubmenu(AXAttributes(role: kAXMenuRole, frame: openSubmenuFrame)))
+    }
+
+    @Test func nonMenuChildIsNeverAClosedSubmenu() {
+        // Only AXMenu children are subject to the collapse; a real off-screen
+        // control (unlikely, but must not be dropped by this predicate) is kept.
+        #expect(!MenuDescent.isClosedSubmenu(AXAttributes(role: kAXButtonRole, frame: closedSubmenuFrame)))
+        #expect(!MenuDescent.isClosedSubmenu(AXAttributes(role: kAXGroupRole, frame: nil)))
     }
 }
 

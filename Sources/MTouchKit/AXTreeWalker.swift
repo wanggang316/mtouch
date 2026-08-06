@@ -77,9 +77,24 @@ public enum AXTreeWalker {
             truncated = true
             return AXNode(attributes: attributes, children: [])
         }
-        let children = provider.children(of: element).map {
+        let children = descendableChildren(provider: provider, ownerRole: attributes.role, of: element).map {
             buildNode(provider: provider, element: $0, depth: depth + 1, truncated: &truncated)
         }
         return AXNode(attributes: attributes, children: children)
+    }
+
+    /// The children to actually descend into. Identical to the raw child list
+    /// except for menu owners, whose CLOSED submenus are dropped so the snapshot
+    /// exposes only what an agent can currently act on (see `MenuDescent`). The
+    /// extra child read is gated to menu owners, so the rest of the tree is
+    /// untouched.
+    private static func descendableChildren<Provider: AXTreeProvider>(
+        provider: Provider,
+        ownerRole: String,
+        of element: Provider.Element
+    ) -> [Provider.Element] {
+        let children = provider.children(of: element)
+        guard MenuDescent.ownsSubmenu(ownerRole: ownerRole) else { return children }
+        return children.filter { !MenuDescent.isClosedSubmenu(provider.attributes(of: $0)) }
     }
 }
