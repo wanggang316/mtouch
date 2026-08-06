@@ -23,6 +23,10 @@ public enum LiveScreenCapture {
     static let captureDeadline: TimeInterval = 15
 
     public static func capture(_ target: CaptureTarget) -> Result<CapturedImage, ScreenCaptureError> {
+        // The run-loop pump below and SCK's window-server (CGS) calls both require
+        // the main thread; an off-main caller would starve the pump and hang to the
+        // 15s deadline. Fail loud instead. Both current callers are main-correct.
+        assert(Thread.isMainThread, "LiveScreenCapture.capture must run on the main thread")
         let box = ResultBox()
         // The SCK window path issues synchronous window-server (CGS) calls that
         // MUST run on the main thread; isolate the capture to the main actor and

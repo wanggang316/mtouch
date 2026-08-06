@@ -18,6 +18,8 @@ public struct ScreenPoint: Equatable, Sendable {
               let x = Double(components[0].trimmingCharacters(in: .whitespaces)),
               let y = Double(components[1].trimmingCharacters(in: .whitespaces))
         else { return nil }
+        // Reject inf/nan: a non-finite coordinate is never a real click target.
+        guard x.isFinite, y.isFinite else { return nil }
         self.init(x: x, y: y)
     }
 }

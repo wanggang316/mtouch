@@ -23,11 +23,13 @@ public enum ScreenCaptureImage {
     /// Whether `image` is effectively all-black/empty — the signature of a failed
     /// capture (a denied or empty SCK frame) rather than real content.
     ///
-    /// The image is downsampled into a small RGB grid and declared blank only
-    /// when EVERY sampled cell is exactly zero in all colour channels. Averaging
-    /// means any real content — a menu bar, a caret, text, wallpaper — leaves at
-    /// least one non-zero cell, so a legitimately dark (even dark-mode) capture
-    /// is never rejected; only a wholly black/transparent frame trips it.
+    /// The image is downsampled by an interpolated `CGContext` draw into a small
+    /// RGB grid (not an exact box-average) and declared blank only when EVERY
+    /// sampled cell is exactly zero in all colour channels. Because the
+    /// interpolated downsample folds neighbouring pixels into each cell, any real
+    /// content — a menu bar, a caret, text, wallpaper — leaves at least one
+    /// non-zero cell, so a legitimately dark (even dark-mode) capture is never
+    /// rejected; only a wholly black/transparent frame trips it.
     public static func isEffectivelyBlank(_ image: CGImage, gridSize: Int = 16) -> Bool {
         let side = max(1, gridSize)
         let bytesPerPixel = 4

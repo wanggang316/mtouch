@@ -94,8 +94,8 @@ public struct AXNode: Equatable, Sendable {
 /// diff engine) and the validation contract reference this exact set.
 public enum AXActionable {
     /// Roles that are inherently actionable regardless of exposed actions.
-    /// Web-content roles ("AXLink", "AXTextArea") have no HIServices constant,
-    /// so they appear as string literals; the rest use the SDK constants.
+    /// The web-content role "AXLink" has no HIServices constant, so it appears
+    /// as a string literal; the rest use the SDK constants.
     public static let roles: Set<String> = [
         kAXButtonRole,
         kAXMenuItemRole,
@@ -106,7 +106,7 @@ public enum AXActionable {
         kAXPopUpButtonRole,
         kAXComboBoxRole,
         kAXTextFieldRole,
-        "AXTextArea",
+        kAXTextAreaRole,
         "AXLink",
         kAXTabGroupRole,
         kAXSliderRole,

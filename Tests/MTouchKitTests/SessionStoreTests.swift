@@ -63,6 +63,9 @@ private func withTempDir(_ body: (URL) throws -> Void) rethrows {
 
             // Well-formed but out-of-range token -> stale (act layer: exit 3).
             #expect(SessionStore.resolve("e999", from: path) == .stale)
+            // A leading-zero form is still a token (a plausible typo of a real
+            // ref): absent -> stale (exit 3), NOT unknown.
+            #expect(SessionStore.resolve("e01", from: path) == .stale)
             // Not a ref token at all -> unknown (act layer: exit 64).
             #expect(SessionStore.resolve("banana", from: path) == .unknown)
             #expect(SessionStore.resolve("e0", from: path) == .unknown)
@@ -157,6 +160,25 @@ private func withTempDir(_ body: (URL) throws -> Void) rethrows {
 // MARK: - Corruption
 
 @Suite struct SessionStoreCorruptionTests {
+    @Test func mismatchedVersionLoadsAsNilThenSaveRewritesCleanly() throws {
+        // A future v2 file must read as absent to a v1 binary rather than being
+        // mis-decoded. The version gate folds this into the corrupt-as-absent path.
+        try withTempDir { dir in
+            let path = dir.appendingPathComponent("session.json").path
+            let future = Session(version: Session.currentVersion + 1, app: "app", pid: 1, digest: "deadbeef", refs: [:])
+            try JSONEncoder().encode(future).write(to: URL(fileURLWithPath: path))
+
+            #expect(SessionStore.load(from: path) == nil)          // treated as absent
+            #expect(SessionStore.resolve("e1", from: path) == .noSession)
+
+            // A subsequent save heals the file at the current version.
+            try SessionStore.save(sampleSnapshot(), app: "app", pid: 7, to: path)
+            let session = try #require(SessionStore.load(from: path))
+            #expect(session.version == Session.currentVersion)
+            #expect(session.refs.count == 3)
+        }
+    }
+
     @Test func corruptFileLoadsAsNilThenSaveRewritesCleanly() throws {
         try withTempDir { dir in
             let path = dir.appendingPathComponent("session.json").path

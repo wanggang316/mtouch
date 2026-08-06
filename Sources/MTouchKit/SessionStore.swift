@@ -79,24 +79,35 @@ public enum SessionStore {
             throw SessionStoreError.notWritable(path: path, reason: message(for: error))
         }
 
+        // Capture errno INSIDE the closure at the failure site: it can be
+        // clobbered while the `withCString` buffers tear down, so reading it after
+        // the call could report a stale/unrelated reason.
+        var renameErrno: Int32 = 0
         let renamed = temp.path.withCString { source in
-            target.path.withCString { destination in
-                rename(source, destination)
+            target.path.withCString { destination -> Int32 in
+                let result = rename(source, destination)
+                if result != 0 { renameErrno = errno }
+                return result
             }
         }
         if renamed != 0 {
-            let reason = String(cString: strerror(errno))
+            let reason = String(cString: strerror(renameErrno))
             try? FileManager.default.removeItem(at: temp)
             throw SessionStoreError.notWritable(path: path, reason: reason)
         }
     }
 
-    /// Load the session at `path`, or `nil` when the file is MISSING or CORRUPT
-    /// (unparseable JSON). Corruption is treated as absence — never a crash — so
-    /// a stray/garbage file degrades to "no session" and the next `save` heals it.
+    /// Load the session at `path`, or `nil` when the file is MISSING, CORRUPT
+    /// (unparseable JSON), or of a MISMATCHED schema version. All three degrade to
+    /// absence — never a crash — so a stray/garbage/future-version file reads as
+    /// "no session" and the next `save` heals it. The version gate keeps a future
+    /// v2 file from being mis-decoded by a v1 binary.
     public static func load(from path: String) -> Session? {
-        guard let data = try? Data(contentsOf: URL(fileURLWithPath: path)) else { return nil }
-        return try? decoder.decode(Session.self, from: data)
+        guard let data = try? Data(contentsOf: URL(fileURLWithPath: path)),
+              let session = try? decoder.decode(Session.self, from: data),
+              session.version == Session.currentVersion
+        else { return nil }
+        return session
     }
 
     /// Resolve `ref` against an already-loaded session (`nil` ⇒ `.noSession`).

@@ -15,6 +15,14 @@ import Testing
         #expect(JSONText.number(-3.25) == "-3.25")
     }
 
+    @Test func nonFiniteDoublesRenderAsZero() {
+        // The documented NaN/inf -> "0" branch keeps a stray non-finite value from
+        // producing invalid JSON (`nan`/`inf` are not JSON tokens).
+        #expect(JSONText.number(.nan) == "0")
+        #expect(JSONText.number(.infinity) == "0")
+        #expect(JSONText.number(-.infinity) == "0")
+    }
+
     @Test func escapesQuotesBackslashesAndControlCharacters() {
         #expect(JSONText.string("a\"b\\c\nd\te\u{01}") == "\"a\\\"b\\\\c\\nd\\te\\u0001\"")
         #expect(JSONText.string("") == "\"\"")

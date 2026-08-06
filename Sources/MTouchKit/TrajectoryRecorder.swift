@@ -35,10 +35,13 @@ public enum TrajectoryError: Error, LocalizedError, Equatable {
 /// how `args`/`kind` are derived and how the native result maps to a
 /// `TrajectoryOutcomeInfo` — both small closures the caller supplies.
 public enum TrajectoryRecorder {
-    /// Payload-bearing keyboard keys stripped from a FAILED/refused record, so a
-    /// secure-input refusal (or any other failed `type`/`key`) records the event
-    /// but never the typed text/combo (a possible password).
-    private static let secretKeys: Set<String> = ["text", "combo"]
+    /// Payload-bearing arg keys stripped from a FAILED/refused record, so the
+    /// event is recorded but its secret payload is not. Covers the keyboard verbs
+    /// (`type`/`key` → `text`/`combo`) AND `set-value`'s `value`, which bypasses
+    /// the secure-input gate: without this a failed `set-value <secret>` would
+    /// persist the secret plaintext. Stripped only on failure — a SUCCESSFUL
+    /// set-value's value change is legitimately observable.
+    private static let secretKeys: Set<String> = ["text", "combo", "value"]
 
     /// Run `operation` and, when recording is on, append one record for it.
     ///

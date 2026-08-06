@@ -26,7 +26,9 @@ public enum CaptureTarget: Equatable, Sendable {
 /// `pixels / scale` and the reported relation `pixels == points × scale` holds.
 ///
 /// `@unchecked Sendable`: `CGImage` is immutable once created, and this value
-/// only crosses the capture bridge under a semaphore's happens-before ordering.
+/// only crosses the capture bridge inside `LiveScreenCapture.ResultBox`, whose
+/// `NSLock` establishes the happens-before ordering between the writing task and
+/// the reading pump.
 public struct CapturedImage: @unchecked Sendable {
     public let cgImage: CGImage
     /// Human name of the captured display for the stdout line's `display "…"`

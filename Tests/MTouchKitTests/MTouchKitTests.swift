@@ -35,6 +35,12 @@ import Testing
     func rejectsMalformedInput(_ input: String) {
         #expect(ScreenPoint(parsing: input) == nil)
     }
+
+    @Test(arguments: ["inf,3", "nan,0", "3,inf", "0,nan", "-inf,1"])
+    func rejectsNonFiniteComponents(_ input: String) {
+        // A non-finite coordinate is never a real click target.
+        #expect(ScreenPoint(parsing: input) == nil)
+    }
 }
 
 @Suite struct WaitDurationTests {
@@ -63,6 +69,14 @@ import Testing
 
     @Test(arguments: ["", "-1", "-1s", "abc", "5sx", "s", "ms", "5 s", "1.2.3"])
     func rejectsMalformedInput(_ input: String) {
+        #expect(WaitDuration(parsing: input) == nil)
+    }
+
+    @Test(arguments: ["inf", "nan", "infinity", "infs", "infms", "-inf"])
+    func rejectsNonFiniteValues(_ input: String) {
+        // A non-finite timeout must be a usage error (exit 64), never an unbounded
+        // poll: `Double("inf")` is `>= 0` but not finite, so the finite guard is
+        // what rejects it.
         #expect(WaitDuration(parsing: input) == nil)
     }
 }

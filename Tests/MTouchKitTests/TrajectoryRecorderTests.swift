@@ -264,6 +264,52 @@ private func info(ok: Bool, exit: Int32?, errorClass: String?, diff: String? = n
         }
     }
 
+    @Test func failedSetValueRecordsEventButNeverThePayload() throws {
+        // set-value bypasses the secure-input gate, so without redaction a failed
+        // `set-value <secret>` would persist the secret plaintext. On failure the
+        // `value` arg is stripped just like a failed type/key's text/combo.
+        try withTempDir { dir in
+            let trajectory = dir.appendingPathComponent("t.jsonl").path
+            let session = dir.appendingPathComponent("s.json").path
+            try writeSession(["A"], app: "app", pid: 1, to: session)
+            let env = ["MTOUCH_TRAJECTORY": trajectory, "MTOUCH_SESSION": session]
+            let secret = "hunter2-topsecret"
+
+            _ = try TrajectoryRecorder.record(command: "act",
+                args: TrajectoryArgs.build(["verb": .string("set-value"), "ref": .string("e1"), "value": .string(secret)]),
+                kind: .action, environment: env, operation: {},
+                describe: { _ in info(ok: false, exit: MTouchExitCode.refError.rawValue, errorClass: "ref") })
+
+            let raw = try String(contentsOf: URL(fileURLWithPath: trajectory), encoding: .utf8)
+            #expect(!raw.contains(secret))                         // payload absent from the raw bytes
+
+            let record = try #require(try readRecords(trajectory).first)
+            let args = try #require(record["args"] as? [String: Any])
+            #expect(args["value"] == nil)                          // no value key at all
+            #expect(args["verb"] as? String == "set-value")        // but the event IS recorded
+            #expect(args["ref"] as? String == "e1")
+        }
+    }
+
+    @Test func successfulSetValueKeepsValueForReplay() throws {
+        // A SUCCESSFUL set-value's value change is legitimately observable and kept.
+        try withTempDir { dir in
+            let trajectory = dir.appendingPathComponent("t.jsonl").path
+            let session = dir.appendingPathComponent("s.json").path
+            try writeSession(["A"], app: "app", pid: 1, to: session)
+            let env = ["MTOUCH_TRAJECTORY": trajectory, "MTOUCH_SESSION": session]
+
+            _ = try TrajectoryRecorder.record(command: "act",
+                args: TrajectoryArgs.build(["verb": .string("set-value"), "ref": .string("e1"), "value": .string("visible text")]),
+                kind: .action, environment: env, operation: {},
+                describe: { _ in info(ok: true, exit: 0, errorClass: nil, diff: "d") })
+
+            let record = try #require(try readRecords(trajectory).first)
+            let args = try #require(record["args"] as? [String: Any])
+            #expect(args["value"] as? String == "visible text")
+        }
+    }
+
     @Test func successfulTypeKeepsTextForReplay() throws {
         try withTempDir { dir in
             let trajectory = dir.appendingPathComponent("t.jsonl").path
