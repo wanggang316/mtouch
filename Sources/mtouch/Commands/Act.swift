@@ -195,6 +195,26 @@ extension Act {
 
 // MARK: - Keyboard verbs
 
+/// Executes a keyboard verb through `ActPipeline.runKeyboard` and maps its
+/// outcome to stdout/stderr + exit code, mirroring `runRefVerb`. The pipeline
+/// reuses the ref verbs' back half (activate → post → re-walk → diff → persist);
+/// only the "act" step differs (keystrokes to the focused element).
+func runKeyboardVerb(_ action: KeyboardAction, appOverride: String?, json: Bool) throws {
+    let outcome = ActPipeline.runKeyboard(
+        action: action,
+        appOverride: appOverride,
+        json: json,
+        environment: ProcessInfo.processInfo.environment
+    )
+    switch outcome {
+    case let .acted(output):
+        print(output)
+    case let .failed(stderr, code):
+        FileHandle.standardError.write(Data((stderr + "\n").utf8))
+        throw ExitCode(code.rawValue)
+    }
+}
+
 extension Act {
     struct TypeText: ParsableCommand {
         static let configuration = CommandConfiguration(
@@ -205,9 +225,14 @@ extension Act {
         @Argument(help: ArgumentHelp("Text to type.", valueName: "text"))
         var text: String
 
+        @Flag(help: "Emit the resulting diff as machine-readable JSON.")
+        var json = false
+
         @OptionGroup var appOptions: OptionalAppOptions
 
-        mutating func run() throws { stubExit("act type") }
+        mutating func run() throws {
+            try runKeyboardVerb(.type(text), appOverride: appOptions.app, json: json)
+        }
     }
 
     struct Key: ParsableCommand {
@@ -219,8 +244,22 @@ extension Act {
         @Argument(help: ArgumentHelp("Key combination, e.g. 'cmd+shift+t'.", valueName: "combo"))
         var combo: String
 
+        @Flag(help: "Emit the resulting diff as machine-readable JSON.")
+        var json = false
+
         @OptionGroup var appOptions: OptionalAppOptions
 
-        mutating func run() throws { stubExit("act key") }
+        mutating func run() throws {
+            // Parse the combo FIRST: an unknown modifier/key name is a usage error
+            // (exit 64) that must precede any permission/AX work (pinned 64 -> 2 -> 3).
+            let parsed: KeyCombo
+            do {
+                parsed = try KeyCombo(parsing: combo)
+            } catch let error as KeyComboParseError {
+                FileHandle.standardError.write(Data((error.message + "\n").utf8))
+                throw ExitCode(error.exitCode.rawValue)
+            }
+            try runKeyboardVerb(.key(parsed), appOverride: appOptions.app, json: json)
+        }
     }
 }

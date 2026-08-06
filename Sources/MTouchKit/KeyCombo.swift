@@ -5,7 +5,7 @@ import CoreGraphics
 /// modifier flags, resolved to the `CGKeyCode` + `CGEventFlags` a keyboard
 /// `CGEvent` needs. Parsing is the ONLY place key/modifier names are
 /// interpreted; the synthesizer just emits the resolved codes.
-public struct KeyCombo: Equatable {
+public struct KeyCombo: Equatable, Sendable {
     public let keyCode: CGKeyCode
     public let flags: CGEventFlags
 

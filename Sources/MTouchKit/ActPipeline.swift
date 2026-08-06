@@ -167,6 +167,157 @@ public enum ActPipeline {
         return .acted(rendered)
     }
 
+    // MARK: - Keyboard verbs (type / key)
+
+    /// The resolved keyboard target, or a terminal outcome returned as-is. Split
+    /// out (like `resolveTarget`) so the permission-before-target precedence is
+    /// exercisable without any AX access.
+    enum KeyboardTarget {
+        case resolved(pid: pid_t, app: String, refs: [String: RefEntry], sessionPath: String)
+        case terminal(ActOutcome)
+    }
+
+    /// Resolve the app a keyboard verb targets: the explicit `--app`, else the
+    /// current session's app. The permission gate (exit 2) is checked FIRST so it
+    /// precedes every session/app resolution (pinned precedence 64 → 2 → 3 → 1;
+    /// the usage-64 combo-parse for `key` happens in the CLI before this).
+    static func resolveKeyboardTarget(
+        appOverride: String?,
+        environment: [String: String],
+        permissions: PermissionProvider,
+        loadSession: (String) -> Session?,
+        resolvePID: (String) throws -> pid_t
+    ) -> KeyboardTarget {
+        // Permission (exit 2): fail fast with the doctor-pointing diagnostic,
+        // BEFORE resolving the session or the target app.
+        guard permissions.accessibilityGranted else {
+            return .terminal(.failed(
+                stderr: PermissionError(permission: .accessibility).diagnostic,
+                code: .permissionMissing
+            ))
+        }
+
+        let sessionPath = SessionStore.sessionFilePath(environment: environment)
+        let session = loadSession(sessionPath)
+
+        // Explicit `--app` selects the target directly. When it names the SAME
+        // running app as the session, the session refs still describe that tree, so
+        // carry them (the focused element keeps its ref in the diff); otherwise the
+        // session (if any) describes a different app, so number the diff afresh.
+        if let appOverride {
+            let pid: pid_t
+            do {
+                pid = try resolvePID(appOverride)
+            } catch let error as AppNotRunningError {
+                return .terminal(.failed(stderr: error.message, code: .runtimeFailure))
+            } catch {
+                return .terminal(.failed(
+                    stderr: "mtouch: could not resolve application '\(appOverride)': \(error)",
+                    code: .runtimeFailure
+                ))
+            }
+            if let session, session.pid == pid,
+               session.app.caseInsensitiveCompare(appOverride) == .orderedSame {
+                return .resolved(pid: pid, app: session.app, refs: session.refs, sessionPath: sessionPath)
+            }
+            return .resolved(pid: pid, app: appOverride, refs: [:], sessionPath: sessionPath)
+        }
+
+        // No override: the session's app is the target. Without a session there is
+        // no target to type into — exit 3, advising a snapshot (or an explicit --app).
+        guard let session else {
+            return .terminal(.failed(stderr: noKeyboardTargetDiagnostic(), code: .refError))
+        }
+        return .resolved(pid: session.pid, app: session.app, refs: session.refs, sessionPath: sessionPath)
+    }
+
+    /// Compose a keyboard `act` verb end-to-end, reusing the SAME back half as the
+    /// ref verbs (pre-walk → act → bounded settle → diff → persist). The only
+    /// difference is the "act" step: keystrokes are delivered to the target's
+    /// FOCUSED element via `deliver` (activate + secure-check + post), rather than
+    /// an AX action on a re-located element.
+    ///
+    /// An empty `type` is an explicit no-op: it delivers nothing and reports
+    /// "(no changes)" (exit 0), short-circuiting before any permission/target work
+    /// because it can neither fail nor change anything.
+    public static func runKeyboard(
+        action: KeyboardAction,
+        appOverride: String?,
+        json: Bool,
+        environment: [String: String],
+        permissions: PermissionProvider = LivePermissionProvider(),
+        loadSession: (String) -> Session? = { SessionStore.load(from: $0) },
+        resolvePID: (String) throws -> pid_t = { try AXWindowEnumerator.resolveRunningPID(bundleId: $0) },
+        isRunning: (pid_t, String) -> Bool = { ActProcess.isRunning(pid: $0, bundleId: $1) },
+        rewalk: (pid_t) -> [AXNode]? = { pid in BoundedWalk.run { AXTreeWalker.walk(pid: pid).nodes } },
+        deliver: (pid_t, KeyboardAction) throws -> Void = { pid, action in
+            try LiveKeyboardDelivery.deliver(pid: pid, action: action)
+        },
+        persist: (Snapshot, String, pid_t, String) throws -> Void = { snapshot, app, pid, path in
+            try SessionStore.save(snapshot, app: app, pid: pid, to: path)
+        },
+        sleep: (TimeInterval) -> Void = { Thread.sleep(forTimeInterval: $0) }
+    ) -> ActOutcome {
+        if case let .type(text) = action, text.isEmpty {
+            let empty = Diff(added: [], removed: [], changed: [], staleRefs: [])
+            return .acted(json ? renderDiffJSON(empty) : renderDiffText(empty))
+        }
+
+        let pid: pid_t
+        let app: String
+        let refs: [String: RefEntry]
+        let sessionPath: String
+        switch resolveKeyboardTarget(
+            appOverride: appOverride, environment: environment,
+            permissions: permissions, loadSession: loadSession, resolvePID: resolvePID
+        ) {
+        case let .terminal(outcome):
+            return outcome
+        case let .resolved(resolvedPID, resolvedApp, resolvedRefs, path):
+            pid = resolvedPID
+            app = resolvedApp
+            refs = resolvedRefs
+            sessionPath = path
+        }
+
+        // Runtime (exit 1): the target process is gone.
+        guard isRunning(pid, app) else {
+            return .failed(stderr: notRunningDiagnostic(app: app, pid: pid), code: .runtimeFailure)
+        }
+
+        // Pre-action walk for the diff baseline. A wedged target -> bounded exit 1.
+        guard let preNodes = rewalk(pid) else {
+            return .failed(stderr: timeoutDiagnostic(app: app, pid: pid), code: .runtimeFailure)
+        }
+        // Carry the session's refs onto the pre tree so a changed focused element
+        // keeps its ref in the diff (matching the ref verbs' pre snapshot).
+        let preSnapshot = Snapshot(roots: ScrollEnrichment.enrich(preNodes), refs: refs)
+
+        // Deliver the keystrokes. Secure input active -> exit 5, ZERO events, and a
+        // payload-free diagnostic (both inherited from `SecureInputActive`).
+        do {
+            try deliver(pid, action)
+        } catch let error as SecureInputActive {
+            return .failed(stderr: error.diagnostic, code: error.exitCode)
+        } catch {
+            return .failed(stderr: "mtouch: failed to deliver keystrokes: \(error)", code: .runtimeFailure)
+        }
+
+        // Bounded re-walk until the change appears, diff against the pre tree,
+        // persist the new session, then render.
+        let result = settledDiff(
+            pre: preSnapshot, pid: pid, expectsMenu: false, rewalk: rewalk, sleep: sleep
+        )
+        do {
+            try persist(result.newSnapshot, app, pid, sessionPath)
+        } catch {
+            return .failed(stderr: saveDiagnostic(error, path: sessionPath), code: .runtimeFailure)
+        }
+
+        let rendered = json ? renderDiffJSON(result.diff) : renderDiffText(result.diff)
+        return .acted(rendered)
+    }
+
     // MARK: - Post-action settle
 
     /// Re-walk and diff until the action's effect is visible or the budget is
@@ -218,6 +369,11 @@ public enum ActPipeline {
     static func noSessionDiagnostic(_ ref: String) -> String {
         "mtouch: no active snapshot session, so reference '\(ref)' cannot be resolved. "
             + "Run 'mtouch snapshot --app <bundleId>' first."
+    }
+
+    static func noKeyboardTargetDiagnostic() -> String {
+        "mtouch: no active snapshot session, so there is no app to type into. "
+            + "Run 'mtouch snapshot --app <bundleId>' first, or pass '--app <bundleId>'."
     }
 
     static func notRunningDiagnostic(app: String, pid: pid_t) -> String {
