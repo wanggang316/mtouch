@@ -23,25 +23,35 @@ public enum SnapshotJSON {
     private static func object(for node: AXNode, path: [Int], snapshot: Snapshot) -> String? {
         if isNoise(node) { return nil }
 
-        var fields: [String] = ["\"role\":\(JSONText.string(node.role))"]
-        if let subrole = node.subrole { fields.append("\"subrole\":\(JSONText.string(subrole))") }
-        if let title = node.title { fields.append("\"title\":\(JSONText.string(title))") }
-        if let value = SecureField.renderedValue(of: node) {
-            fields.append("\"value\":\(JSONText.string(value))")
-        }
-        if let ref = snapshot.ref(atPath: path) { fields.append("\"ref\":\(JSONText.string(ref))") }
-        fields.append("\"enabled\":\(node.enabled)")
-        if let frame = node.frame { fields.append("\"frame\":\(rect(frame))") }
-        if node.isScrollArea, let scroll = node.scrollPosition {
-            fields.append("\"scrollPosition\":\(point(scroll))")
-        }
-
+        var fields = nodeFields(for: node, ref: snapshot.ref(atPath: path))
         let children = node.children.enumerated().compactMap { index, child in
             object(for: child, path: path + [index], snapshot: snapshot)
         }
         fields.append("\"children\":[\(children.joined(separator: ","))]")
 
         return "{" + fields.joined(separator: ",") + "}"
+    }
+
+    /// The per-node JSON field list (`role` … `scrollPosition`) WITHOUT the
+    /// `children` array, factored out so the diff renderer emits node objects in
+    /// the SAME shape and key order — a single source for the node grammar, the
+    /// way `SnapshotText.line` is the single source for the text grammar. `ref`
+    /// is the node's carried/assigned ref (nil to omit). Secure values are masked
+    /// here TOO (via `SecureField`), so a secret never leaks through any surface.
+    static func nodeFields(for node: AXNode, ref: String?) -> [String] {
+        var fields: [String] = ["\"role\":\(JSONText.string(node.role))"]
+        if let subrole = node.subrole { fields.append("\"subrole\":\(JSONText.string(subrole))") }
+        if let title = node.title { fields.append("\"title\":\(JSONText.string(title))") }
+        if let value = SecureField.renderedValue(of: node) {
+            fields.append("\"value\":\(JSONText.string(value))")
+        }
+        if let ref { fields.append("\"ref\":\(JSONText.string(ref))") }
+        fields.append("\"enabled\":\(node.enabled)")
+        if let frame = node.frame { fields.append("\"frame\":\(rect(frame))") }
+        if node.isScrollArea, let scroll = node.scrollPosition {
+            fields.append("\"scrollPosition\":\(point(scroll))")
+        }
+        return fields
     }
 
     private static func rect(_ frame: CGRect) -> String {

@@ -58,6 +58,22 @@ public struct Snapshot: Equatable, Sendable {
         self.refByPath = byPath
     }
 
+    /// Build a snapshot around a PRECOMPUTED ref table instead of numbering
+    /// afresh. The post-action diff engine carries the PRE snapshot's refs across
+    /// to matched POST nodes and issues fresh (continuing) refs for added nodes;
+    /// the resulting POST snapshot must therefore keep those exact refs rather
+    /// than re-running naive pre-order numbering (which would renumber survivors).
+    /// The reverse `path -> ref` index is derived from each entry's `path`, so
+    /// renderers resolve refs identically to a normally-numbered snapshot.
+    public init(roots: [AXNode], refs: [String: RefEntry]) {
+        self.roots = roots
+        self.refs = refs
+
+        var byPath: [[Int]: String] = [:]
+        for entry in refs.values { byPath[entry.path] = entry.ref }
+        self.refByPath = byPath
+    }
+
     /// The ref assigned to the node reached by `path` (index path from `roots`),
     /// or nil when that node is not actionable. Renderers pass the path they are
     /// already tracking; the diff engine reuses it for ref carry-over.

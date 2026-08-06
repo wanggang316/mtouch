@@ -93,25 +93,28 @@ public enum SnapshotText {
 
 // MARK: - Filtered traversal shared by renderers
 
-/// One node that survives noise filtering, paired with its ref and rendered
-/// depth. Produced by `Snapshot.renderedNodes()`.
+/// One node that survives noise filtering, paired with its ref, rendered depth,
+/// and structural path. Produced by `Snapshot.renderedNodes()`. The `path` lets
+/// the diff engine match nodes positionally across two snapshots using the same
+/// filtered view the renderers use.
 struct RenderedNode {
     let node: AXNode
     let ref: String?
     let depth: Int
+    let path: [Int]
 }
 
 extension Snapshot {
     /// Pre-order list of nodes that survive `isNoise`, each with its ref (if
-    /// actionable) and rendered depth. Because a noise node has no actionable
-    /// descendant, skipping its whole subtree never drops a ref. The path used
-    /// for ref lookup indexes the ORIGINAL children, so refs stay exact even as
+    /// actionable), rendered depth, and structural path. Because a noise node has
+    /// no actionable descendant, skipping its whole subtree never drops a ref.
+    /// The path indexes the ORIGINAL children, so refs stay exact even as
     /// non-actionable siblings are filtered out.
     func renderedNodes() -> [RenderedNode] {
         var out: [RenderedNode] = []
         func walk(_ node: AXNode, depth: Int, path: [Int]) {
             if isNoise(node) { return }
-            out.append(RenderedNode(node: node, ref: ref(atPath: path), depth: depth))
+            out.append(RenderedNode(node: node, ref: ref(atPath: path), depth: depth, path: path))
             for (index, child) in node.children.enumerated() {
                 walk(child, depth: depth + 1, path: path + [index])
             }
