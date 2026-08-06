@@ -1,0 +1,244 @@
+import ApplicationServices
+import CoreGraphics
+import Foundation
+import Testing
+@testable import MTouchKit
+
+// MARK: - Fake provider (zero AX/TCC dependency)
+
+/// Drives `AXTreeWalker` from literal `AXNode` trees. Backed by two fixtures:
+/// `before` is returned until the fallback is enabled, then `after`. Counts the
+/// walk passes and fallback attempts so tests can assert the retry is bounded.
+///
+/// `attributes(of:)` re-derives an `AXAttributes` from a fixture node, mapping
+/// the node's declared `actionable` back to an `AXPress` action so the walker's
+/// own `actionable`/`isScrollArea` derivation is exercised (not bypassed). Build
+/// fixtures whose `actionable`/`isScrollArea` are consistent with that
+/// derivation, so a walk round-trips to the fixture.
+final class FakeTreeProvider: AXTreeProvider {
+    typealias Element = AXNode
+
+    private let before: [AXNode]
+    private let after: [AXNode]
+    private var manualAccessibilityEnabled = false
+
+    private(set) var rootsCallCount = 0
+    private(set) var fallbackCallCount = 0
+
+    init(before: [AXNode], after: [AXNode]? = nil) {
+        self.before = before
+        self.after = after ?? before
+    }
+
+    func roots() -> [AXNode] {
+        rootsCallCount += 1
+        return manualAccessibilityEnabled ? after : before
+    }
+
+    func children(of element: AXNode) -> [AXNode] { element.children }
+
+    func attributes(of element: AXNode) -> AXAttributes {
+        AXAttributes(
+            role: element.role,
+            subrole: element.subrole,
+            title: element.title,
+            value: element.value,
+            frame: element.frame,
+            enabled: element.enabled,
+            actionNames: element.actionable ? [kAXPressAction] : [],
+            scrollPosition: element.scrollPosition
+        )
+    }
+
+    func enableManualAccessibilityFallback() {
+        fallbackCallCount += 1
+        manualAccessibilityEnabled = true
+    }
+}
+
+// MARK: - Fixtures
+
+private func button(_ title: String) -> AXNode {
+    AXNode(role: kAXButtonRole, title: title, enabled: true, actionable: true)
+}
+
+private func staticText(_ text: String) -> AXNode {
+    AXNode(role: kAXStaticTextRole, title: text)
+}
+
+/// A window whose subtree carries a button and a line of static text.
+private func populatedWindow() -> AXNode {
+    AXNode(
+        role: kAXWindowRole,
+        title: "Untitled",
+        children: [
+            AXNode(role: kAXGroupRole, children: [button("OK"), staticText("Hello")]),
+        ]
+    )
+}
+
+/// A window whose subtree has no actionable elements and no text — only inert
+/// chrome. The window still reports a title (which must not count as content).
+private func blankWindow() -> AXNode {
+    AXNode(
+        role: kAXWindowRole,
+        title: "Untitled",
+        children: [AXNode(role: kAXGroupRole, children: [AXNode(role: kAXGroupRole)])]
+    )
+}
+
+// MARK: - Walker behavior
+
+@Suite struct TreeWalkerTests {
+    @Test func populatedTreeRoundTripsWithoutFallback() {
+        let fixture = [populatedWindow()]
+        let provider = FakeTreeProvider(before: fixture)
+
+        let result = AXTreeWalker.walk(provider: provider)
+
+        #expect(result.nodes == fixture)
+        #expect(result.fallbackFired == false)
+        #expect(result.fallbackHelped == false)
+        #expect(result.truncated == false)
+        // No emptiness -> exactly one pass, fallback never attempted.
+        #expect(provider.rootsCallCount == 1)
+        #expect(provider.fallbackCallCount == 0)
+    }
+
+    @Test func emptyThenPopulatedFiresFallbackAndItHelps() {
+        let populated = [populatedWindow()]
+        let provider = FakeTreeProvider(before: [blankWindow()], after: populated)
+
+        let result = AXTreeWalker.walk(provider: provider)
+
+        #expect(result.nodes == populated)
+        #expect(result.fallbackFired == true)
+        #expect(result.fallbackHelped == true)
+        // First pass empty, second pass populated -> exactly two passes.
+        #expect(provider.rootsCallCount == 2)
+        #expect(provider.fallbackCallCount == 1)
+    }
+
+    @Test func emptyThenEmptyFiresFallbackExactlyOnceAndItDoesNotHelp() {
+        let provider = FakeTreeProvider(before: [blankWindow()], after: [blankWindow()])
+
+        let result = AXTreeWalker.walk(provider: provider)
+
+        #expect(isEffectivelyEmpty(result.nodes))
+        #expect(result.fallbackFired == true)
+        #expect(result.fallbackHelped == false)
+        // The retry is bounded: exactly two walk passes and one fallback attempt.
+        #expect(provider.rootsCallCount == 2)
+        #expect(provider.fallbackCallCount == 1)
+    }
+
+    @Test func pathologicalDepthIsCappedNotInfinite() {
+        // A chain deeper than the cap: the walk must terminate, flag truncation,
+        // and not descend past the cap.
+        var leaf = AXNode(role: kAXGroupRole)
+        for _ in 0..<(AXTreeWalker.maxDepth + 50) {
+            leaf = AXNode(role: kAXGroupRole, children: [leaf])
+        }
+        let provider = FakeTreeProvider(before: [AXNode(role: kAXWindowRole, children: [leaf])])
+
+        let result = AXTreeWalker.walk(provider: provider)
+
+        #expect(result.truncated == true)
+        let depth = maxDepthOf(result.nodes[0])
+        #expect(depth <= AXTreeWalker.maxDepth)
+    }
+
+    private func maxDepthOf(_ node: AXNode) -> Int {
+        1 + (node.children.map(maxDepthOf).max() ?? -1)
+    }
+}
+
+// MARK: - Actionable predicate
+
+@Suite struct AXActionableTests {
+    @Test func rolesInTheSetAreActionable() {
+        #expect(AXActionable.isActionable(role: kAXButtonRole, actionNames: []))
+        #expect(AXActionable.isActionable(role: kAXMenuItemRole, actionNames: []))
+        #expect(AXActionable.isActionable(role: kAXCheckBoxRole, actionNames: []))
+        #expect(AXActionable.isActionable(role: "AXLink", actionNames: []))
+        #expect(AXActionable.isActionable(role: "AXTextArea", actionNames: []))
+    }
+
+    @Test func pressActionMakesAnyRoleActionable() {
+        #expect(AXActionable.isActionable(role: kAXGroupRole, actionNames: [kAXPressAction]))
+    }
+
+    @Test func inertRoleWithoutPressIsNotActionable() {
+        #expect(!AXActionable.isActionable(role: kAXGroupRole, actionNames: []))
+        #expect(!AXActionable.isActionable(role: kAXStaticTextRole, actionNames: [kAXShowMenuAction]))
+    }
+
+    @Test func actionableIsDerivedWhenBuildingFromAttributes() {
+        // Disabled but actionable: enabled is recorded, not a reason to drop it.
+        let node = AXNode(
+            attributes: AXAttributes(role: kAXButtonRole, enabled: false, actionNames: []),
+            children: []
+        )
+        #expect(node.actionable == true)
+        #expect(node.enabled == false)
+    }
+}
+
+// MARK: - Effectively-empty predicate
+
+@Suite struct IsEffectivelyEmptyTests {
+    @Test func windowWithNoActionableOrTextIsEmpty() {
+        #expect(isEffectivelyEmpty([blankWindow()]))
+    }
+
+    @Test func windowWithAnActionableDescendantIsNotEmpty() {
+        let window = AXNode(role: kAXWindowRole, children: [button("Go")])
+        #expect(!isEffectivelyEmpty([window]))
+    }
+
+    @Test func windowWithTextContentIsNotEmpty() {
+        let window = AXNode(role: kAXWindowRole, children: [staticText("Ready")])
+        #expect(!isEffectivelyEmpty([window]))
+    }
+
+    @Test func menuBarActionableItemsDoNotMaskEmptyWindows() {
+        // The menu bar always has actionable items; it must not count.
+        let menuBar = AXNode(
+            role: kAXMenuBarRole,
+            children: [AXNode(role: kAXMenuBarItemRole, title: "File", actionable: true)]
+        )
+        #expect(isEffectivelyEmpty([blankWindow(), menuBar]))
+    }
+
+    @Test func windowTitleAloneIsNotContent() {
+        let window = AXNode(role: kAXWindowRole, title: "Important Document", children: [])
+        #expect(isEffectivelyEmpty([window]))
+    }
+
+    @Test func noWindowsIsEmpty() {
+        #expect(isEffectivelyEmpty([]))
+    }
+}
+
+// MARK: - Value rendering
+
+@Suite struct AXValueRenderingTests {
+    @Test func rendersStringsBooleansAndNumbers() {
+        #expect(AXValueRendering.string(from: "hello" as CFString) == "hello")
+        #expect(AXValueRendering.string(from: kCFBooleanTrue) == "true")
+        #expect(AXValueRendering.string(from: kCFBooleanFalse) == "false")
+        #expect(AXValueRendering.string(from: 42 as CFNumber) == "42")
+        #expect(AXValueRendering.string(from: 3.5 as CFNumber) == "3.5")
+    }
+
+    @Test func rendersNilForAbsentOrUnsupportedValues() {
+        #expect(AXValueRendering.string(from: nil) == nil)
+    }
+
+    @Test func decodesBooleans() {
+        #expect(AXValueRendering.bool(from: kCFBooleanTrue) == true)
+        #expect(AXValueRendering.bool(from: kCFBooleanFalse) == false)
+        #expect(AXValueRendering.bool(from: nil) == nil)
+        #expect(AXValueRendering.bool(from: "nope" as CFString) == nil)
+    }
+}
