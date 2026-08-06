@@ -29,7 +29,9 @@ public enum DiffEngine {
     /// Diff `post` against `pre`, returning the rendered `diff` plus the
     /// `newSnapshot` (POST tree carrying the reconciled ref table) the act layer
     /// persists as the session's new current state.
-    public static func diff(pre: Snapshot, post: [AXNode]) -> DiffResult {
+    public static func diff(
+        pre: Snapshot, post: [AXNode], postWindowIDsByPath: [[Int]: CGWindowID] = [:]
+    ) -> DiffResult {
         // A naive POST snapshot is used ONLY to obtain the noise-filtered,
         // path-annotated traversal; its refs are discarded in favour of the
         // carried/fresh table computed below.
@@ -41,7 +43,10 @@ public enum DiffEngine {
         var postByPath: [[Int]: RenderedNode] = [:]
         for item in postRendered { postByPath[item.path] = item }
 
-        let newSnapshot = reconciledSnapshot(pre: pre, post: post, postRendered: postRendered)
+        let newSnapshot = reconciledSnapshot(
+            pre: pre, post: post, postRendered: postRendered,
+            postWindowIDsByPath: postWindowIDsByPath
+        )
         let staleRefs = pre.refs.keys.filter { newSnapshot.refs[$0] == nil }.sorted()
 
         // ADDED / CHANGED classified in POST pre-order; refs come from the
@@ -101,25 +106,60 @@ public enum DiffEngine {
     /// Builds the POST snapshot carrying the reconciled ref table: matched
     /// actionable nodes keep their PRE ref; added actionable nodes get fresh refs
     /// continuing the PRE counter, assigned in POST pre-order for determinism.
-    static func reconciledSnapshot(pre: Snapshot, post: [AXNode], postRendered: [RenderedNode]) -> Snapshot {
+    ///
+    /// Carry-over is owning-window-AWARE: a PRE ref keeps its number ONLY when the
+    /// positionally-matched POST element sits under the SAME owning window. After a
+    /// sibling window closes and slides another (even identically-titled) window
+    /// into the vacated position, the PRE ref would otherwise be re-homed onto that
+    /// impostor; instead it goes STALE (absent here) and the surviving element gets
+    /// a fresh ref (VAL-ACT-011). A genuinely-surviving ref has its owning-window id
+    /// re-derived from the post walk, so the identity is PRESERVED across the
+    /// snapshot round-trip rather than dropped (which would defeat the act-layer
+    /// gate on the next action).
+    static func reconciledSnapshot(
+        pre: Snapshot, post: [AXNode], postRendered: [RenderedNode],
+        postWindowIDsByPath: [[Int]: CGWindowID]
+    ) -> Snapshot {
         var newRefs: [String: RefEntry] = [:]
         var nextFresh = maxRefIndex(pre.refs) + 1
 
         for item in postRendered where item.node.actionable {
+            // The POST element's owning-window id, derived from its root prefix
+            // (a window's descendants inherit their root's id).
+            let postWindowID = postWindowIDsByPath[Array(item.path.prefix(1))]
             if let preRef = pre.ref(atPath: item.path),
                let preEntry = pre.refs[preRef],
-               preEntry.role == item.node.role {
-                // Carry the PRE ref across, refreshing the re-resolution hints
-                // from the POST node (frame/title may have moved).
-                newRefs[preRef] = RefEntry(node: item.node, ref: preRef, path: item.path)
+               preEntry.role == item.node.role,
+               windowCarryAllowed(stored: preEntry.ownerWindowID, post: postWindowID) {
+                // Carry the PRE ref across, refreshing the re-resolution hints from
+                // the POST node (frame/title may have moved) and re-deriving the
+                // owning window id so the identity survives the round-trip.
+                newRefs[preRef] = RefEntry(
+                    node: item.node, ref: preRef, path: item.path,
+                    ownerWindowID: postWindowID ?? preEntry.ownerWindowID
+                )
             } else {
                 let ref = Snapshot.refToken(nextFresh)
                 nextFresh += 1
-                newRefs[ref] = RefEntry(node: item.node, ref: ref, path: item.path)
+                newRefs[ref] = RefEntry(
+                    node: item.node, ref: ref, path: item.path, ownerWindowID: postWindowID
+                )
             }
         }
 
         return Snapshot(roots: post, refs: newRefs)
+    }
+
+    /// Whether a PRE ref may carry forward onto a positionally-matched POST element,
+    /// judged by owning-window identity. The gate applies ONLY when BOTH ids are
+    /// known: a ref with no stored id (an older/handle-free session) or a POST
+    /// element with no known id (a non-window subtree, or a walk that captured no
+    /// ids) degrades to the plain positional carry, exactly as before. When both are
+    /// known they must be EQUAL — a same-hint element that slid in from a DIFFERENT
+    /// window is an impostor, so the ref goes STALE rather than being re-homed.
+    static func windowCarryAllowed(stored: CGWindowID?, post: CGWindowID?) -> Bool {
+        guard let stored, let post else { return true }
+        return stored == post
     }
 
     /// Whether two positionally-matched nodes render differently — i.e. any

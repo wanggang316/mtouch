@@ -216,6 +216,55 @@ private let openSubmenuFrame = CGRect(x: 116, y: 30, width: 200, height: 400)
     }
 }
 
+// MARK: - Owning-window id capture (VAL-ACT-011 e2e — snapshot populate)
+
+@Suite struct TreeWalkerWindowIDTests {
+    /// A provider whose WINDOW roots each report a distinct CGWindowID (keyed by
+    /// title) and whose non-window roots report none — so the walker's per-root
+    /// window-id capture is exercised with zero AX access.
+    private final class WindowIDProvider: AXTreeProvider {
+        typealias Element = AXNode
+        let rootNodes: [AXNode]
+        let ids: [String: CGWindowID]
+        init(roots: [AXNode], ids: [String: CGWindowID]) { rootNodes = roots; self.ids = ids }
+        func roots() -> [AXNode] { rootNodes }
+        func children(of element: AXNode) -> [AXNode] { element.children }
+        func attributes(of element: AXNode) -> AXAttributes {
+            AXAttributes(
+                role: element.role, subrole: element.subrole, title: element.title,
+                value: element.value, frame: element.frame, enabled: element.enabled,
+                actionNames: element.actionable ? [kAXPressAction] : [], scrollPosition: element.scrollPosition
+            )
+        }
+        func windowID(of element: AXNode) -> CGWindowID? {
+            element.role == kAXWindowRole ? element.title.flatMap { ids[$0] } : nil
+        }
+        func enableManualAccessibilityFallback() {}
+    }
+
+    @Test func capturesEachRootWindowIDAndSkipsTheMenuBar() {
+        let win0 = AXNode(role: kAXWindowRole, title: "W0", children: [button("Go")])
+        let win1 = AXNode(role: kAXWindowRole, title: "W1", children: [button("Stop")])
+        let menuBar = AXNode(
+            role: kAXMenuBarRole,
+            children: [AXNode(role: kAXMenuBarItemRole, title: "File", actionable: true)]
+        )
+        let provider = WindowIDProvider(roots: [win0, win1, menuBar], ids: ["W0": 7001, "W1": 7002])
+
+        let result = AXTreeWalker.walk(provider: provider)
+
+        // Only the two window roots carry ids; the menu-bar root contributes none.
+        #expect(result.windowIDsByPath == [[0]: 7001, [1]: 7002])
+
+        // Threaded into the snapshot, each ref records its owning window; the
+        // menu-bar item's ref stays nil (no window).
+        let snapshot = Snapshot(roots: result.nodes, windowIDsByPath: result.windowIDsByPath)
+        #expect(snapshot.refs["e1"]?.ownerWindowID == 7001)   // W0's button
+        #expect(snapshot.refs["e2"]?.ownerWindowID == 7002)   // W1's button
+        #expect(snapshot.refs["e3"]?.ownerWindowID == nil)    // menu-bar item
+    }
+}
+
 // MARK: - Menu-descent predicate
 
 @Suite struct MenuDescentTests {

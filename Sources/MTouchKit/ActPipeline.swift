@@ -94,7 +94,7 @@ public enum ActPipeline {
         loadSession: (String) -> Session? = { SessionStore.load(from: $0) },
         isRunning: (pid_t, String) -> Bool = { ActProcess.isRunning(pid: $0, bundleId: $1) },
         walkLive: (pid_t) -> LiveElementTree? = { pid in BoundedWalk.run { LiveElementTree.walk(pid: pid) } },
-        rewalk: (pid_t) -> [AXNode]? = { pid in BoundedWalk.run { AXTreeWalker.walk(pid: pid).nodes } },
+        rewalk: (pid_t) -> WalkResult? = { pid in BoundedWalk.run { AXTreeWalker.walk(pid: pid) } },
         performAction: (AXUIElement, ActVerb, String?) -> Result<Void, AXActionFailure> = { AXAction.perform($0, $1, value: $2) },
         persist: (Snapshot, String, pid_t, String) throws -> Void = { snapshot, app, pid, path in
             try SessionStore.save(snapshot, app: app, pid: pid, to: path)
@@ -134,8 +134,12 @@ public enum ActPipeline {
 
         // Re-locate the SAME element by its hints. A miss means the element is gone
         // (window/element closed): stale (exit 3), and NOTHING is acted on — never
-        // the impostor now occupying that position.
-        guard let path = ElementRelocation.locatePath(entry, in: liveTree.attributesByPath),
+        // the impostor now occupying that position. The live per-element window-id
+        // map is passed so the owning-window gate can reject a same-hint element in
+        // a DIFFERENT (even identically-titled) window (VAL-ACT-011).
+        guard let path = ElementRelocation.locatePath(
+                  entry, in: liveTree.attributesByPath, windowIDsByPath: liveTree.windowIDsByPath
+              ),
               let element = liveTree.elementsByPath[path] else {
             return .failed(stderr: goneRefDiagnostic(ref), code: .refError)
         }
@@ -280,7 +284,7 @@ public enum ActPipeline {
         loadSession: (String) -> Session? = { SessionStore.load(from: $0) },
         resolvePID: (String) throws -> pid_t = { try AXWindowEnumerator.resolveRunningPID(bundleId: $0) },
         isRunning: (pid_t, String) -> Bool = { ActProcess.isRunning(pid: $0, bundleId: $1) },
-        rewalk: (pid_t) -> [AXNode]? = { pid in BoundedWalk.run { AXTreeWalker.walk(pid: pid).nodes } },
+        rewalk: (pid_t) -> WalkResult? = { pid in BoundedWalk.run { AXTreeWalker.walk(pid: pid) } },
         deliver: (pid_t, KeyboardAction) throws -> Void = { pid, action in
             try LiveKeyboardDelivery.deliver(pid: pid, action: action)
         },
@@ -317,12 +321,12 @@ public enum ActPipeline {
         }
 
         // Pre-action walk for the diff baseline. A wedged target -> bounded exit 1.
-        guard let preNodes = rewalk(pid) else {
+        guard let preWalk = rewalk(pid) else {
             return .failed(stderr: timeoutDiagnostic(app: app, pid: pid), code: .runtimeFailure)
         }
         // Carry the session's refs onto the pre tree so a changed focused element
         // keeps its ref in the diff (matching the ref verbs' pre snapshot).
-        let preSnapshot = Snapshot(roots: ScrollEnrichment.enrich(preNodes), refs: refs)
+        let preSnapshot = Snapshot(roots: ScrollEnrichment.enrich(preWalk.nodes), refs: refs)
 
         return runInputVerb(
             pid: pid, app: app, sessionPath: sessionPath,
@@ -360,7 +364,7 @@ public enum ActPipeline {
         resolvePID: (String) throws -> pid_t = { try AXWindowEnumerator.resolveRunningPID(bundleId: $0) },
         isRunning: (pid_t, String) -> Bool = { ActProcess.isRunning(pid: $0, bundleId: $1) },
         onScreen: (ScreenPoint) -> Bool = { ScreenBounds.isOnScreen($0) },
-        rewalk: (pid_t) -> [AXNode]? = { pid in BoundedWalk.run { AXTreeWalker.walk(pid: pid).nodes } },
+        rewalk: (pid_t) -> WalkResult? = { pid in BoundedWalk.run { AXTreeWalker.walk(pid: pid) } },
         deliver: (pid_t, PointerAction) throws -> Void = { pid, action in
             LivePointerDelivery.deliver(pid: pid, action: action)
         },
@@ -398,12 +402,12 @@ public enum ActPipeline {
         }
 
         // Pre-action walk for the diff baseline. A wedged target -> bounded exit 1.
-        guard let preNodes = rewalk(pid) else {
+        guard let preWalk = rewalk(pid) else {
             return .failed(stderr: timeoutDiagnostic(app: app, pid: pid), code: .runtimeFailure)
         }
         // Carry the session's refs onto the pre tree so a changed element keeps its
         // ref in the diff (matching the ref/keyboard verbs' pre snapshot).
-        let preSnapshot = Snapshot(roots: ScrollEnrichment.enrich(preNodes), refs: refs)
+        let preSnapshot = Snapshot(roots: ScrollEnrichment.enrich(preWalk.nodes), refs: refs)
 
         // A right-click opens a context menu, so use the longer menu settle to let
         // its items become walkable.
@@ -439,7 +443,7 @@ public enum ActPipeline {
         preSnapshot: Snapshot,
         expectsMenu: Bool,
         json: Bool,
-        rewalk: (pid_t) -> [AXNode]?,
+        rewalk: (pid_t) -> WalkResult?,
         persist: (Snapshot, String, pid_t, String) throws -> Void,
         sleep: (TimeInterval) -> Void,
         act: () -> ActOutcome?
@@ -477,7 +481,7 @@ public enum ActPipeline {
         pre: Snapshot,
         pid: pid_t,
         expectsMenu: Bool,
-        rewalk: (pid_t) -> [AXNode]?,
+        rewalk: (pid_t) -> WalkResult?,
         sleep: (TimeInterval) -> Void
     ) -> DiffResult {
         let maxAttempts = expectsMenu ? 10 : 4
@@ -486,8 +490,15 @@ public enum ActPipeline {
         // Baseline: identical-to-pre ⇒ "(no changes)" if every re-walk fails.
         var last = DiffEngine.diff(pre: pre, post: pre.roots)
         for attempt in 0..<maxAttempts {
-            if let post = rewalk(pid) {
-                last = DiffEngine.diff(pre: pre, post: ScrollEnrichment.enrich(post))
+            if let result = rewalk(pid) {
+                // Thread the post walk's per-root window ids so the reconcile can
+                // detect a ref whose owning window vanished/changed and let it go
+                // stale instead of re-homing it onto a same-hint impostor.
+                last = DiffEngine.diff(
+                    pre: pre,
+                    post: ScrollEnrichment.enrich(result.nodes),
+                    postWindowIDsByPath: result.windowIDsByPath
+                )
                 if !last.diff.isEmpty { return last }
             }
             if attempt < maxAttempts - 1 { sleep(interval) }

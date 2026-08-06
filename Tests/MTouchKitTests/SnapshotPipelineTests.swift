@@ -224,6 +224,36 @@ private func runPipeline(
     }
 }
 
+// MARK: - Owning-window id stamped onto persisted refs (VAL-ACT-011 e2e)
+
+@Suite struct SnapshotPipelineWindowIDTests {
+    @Test func persistedRefsCarryOwnerWindowIDFromTheLiveWalk() throws {
+        // A walk that captured a root window's id must flow through the pipeline so
+        // the persisted ref table records the owning-window identity — nil before
+        // this wiring existed, which is what let the act layer misdeliver.
+        let tree = AXNode(
+            role: kAXWindowRole, title: "Untitled",
+            frame: CGRect(x: 0, y: 0, width: 400, height: 300),
+            children: [AXNode(role: kAXTextAreaRole, value: "hi",
+                              frame: CGRect(x: 0, y: 0, width: 380, height: 260), actionable: true)]
+        )
+        let walk = WalkResult(nodes: [tree], windowIDsByPath: [[0]: 8123],
+                              fallbackFired: false, fallbackHelped: false, truncated: false)
+        var persisted: Snapshot?
+        let outcome = runPipeline(
+            environment: [:],
+            walk: { _ in walk },
+            persist: { snapshot, _, _, _ in persisted = snapshot }
+        )
+        guard case .rendered = outcome else {
+            Issue.record("expected a rendered outcome, got \(outcome)")
+            return
+        }
+        let entry = try #require(persisted?.refs["e1"])
+        #expect(entry.ownerWindowID == 8123)
+    }
+}
+
 // MARK: - Bounded walk primitive
 
 @Suite struct BoundedWalkTests {

@@ -17,6 +17,11 @@ private func window(_ children: [AXNode]) -> AXNode {
     AXNode(role: kAXWindowRole, title: "W", frame: CGRect(x: 0, y: 0, width: 400, height: 300), children: children)
 }
 
+/// Wrap a walked tree as a `WalkResult` — the shape `rewalk` now yields.
+private func walked(_ nodes: [AXNode]) -> WalkResult {
+    WalkResult(nodes: nodes, fallbackFired: false, fallbackHelped: false, truncated: false)
+}
+
 private let testApp = "com.example.App"
 private let testPID: pid_t = 4242
 
@@ -215,7 +220,7 @@ private final class DeliveryRecorder {
             permissions: StubPermissions(accessibility: true),
             loadSession: { _ in session(for: [window([textArea("")])]) },
             isRunning: { _, _ in true },
-            rewalk: { _ in [window([textArea("")])] },
+            rewalk: { _ in walked([window([textArea("")])]) },
             deliver: { try recorder.deliver($0, $1) },
             persist: { _, _, _, _ in Issue.record("secure input must not persist a session") },
             sleep: { _ in }
@@ -240,7 +245,7 @@ private final class DeliveryRecorder {
             isRunning: { _, _ in true },
             rewalk: { _ in
                 walks += 1
-                return walks == 1 ? pre : post // first walk = pre baseline, then the typed state
+                return walks == 1 ? walked(pre) : walked(post) // pre baseline, then typed state
             },
             deliver: { try recorder.deliver($0, $1) },
             persist: { snapshot, _, _, _ in persisted = snapshot },
@@ -268,7 +273,7 @@ private final class DeliveryRecorder {
             permissions: StubPermissions(accessibility: true),
             loadSession: { _ in session(for: [window([textArea("x")])]) },
             isRunning: { _, _ in true },
-            rewalk: { _ in [window([textArea("x")])] }, // selection change is invisible to AX value
+            rewalk: { _ in walked([window([textArea("x")])]) }, // selection invisible to AX value
             deliver: { try recorder.deliver($0, $1) },
             persist: { _, _, _, _ in }, sleep: { _ in }
         )

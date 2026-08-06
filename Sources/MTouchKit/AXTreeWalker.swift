@@ -1,3 +1,4 @@
+import CoreGraphics
 import Foundation
 
 /// Outcome of a tree walk. Carries the nodes plus the observable signals the
@@ -5,6 +6,13 @@ import Foundation
 public struct WalkResult: Equatable, Sendable {
     /// Root nodes: the app's windows plus the menu bar.
     public let nodes: [AXNode]
+    /// Root index path (`[0]`, `[1]`, …) -> the owning-window CGWindowID for each
+    /// top-level WINDOW root, captured once per root during the walk (the menu bar
+    /// and non-live providers contribute none). The snapshot threads this in so
+    /// each ref records its owning-window identity (VAL-ACT-011); a window's
+    /// descendants inherit their root's id, which the snapshot derives from the
+    /// ref's path prefix rather than needing a per-descendant entry here.
+    public let windowIDsByPath: [[Int]: CGWindowID]
     /// Whether the AXManualAccessibility fallback was attempted (the first pass
     /// came back effectively empty).
     public let fallbackFired: Bool
@@ -15,8 +23,15 @@ public struct WalkResult: Equatable, Sendable {
     /// timeout; this flag specifically marks the depth-cap guard firing.
     public let truncated: Bool
 
-    public init(nodes: [AXNode], fallbackFired: Bool, fallbackHelped: Bool, truncated: Bool) {
+    public init(
+        nodes: [AXNode],
+        windowIDsByPath: [[Int]: CGWindowID] = [:],
+        fallbackFired: Bool,
+        fallbackHelped: Bool,
+        truncated: Bool
+    ) {
         self.nodes = nodes
+        self.windowIDsByPath = windowIDsByPath
         self.fallbackFired = fallbackFired
         self.fallbackHelped = fallbackHelped
         self.truncated = truncated
@@ -43,16 +58,21 @@ public enum AXTreeWalker {
     /// beyond that single retry.
     public static func walk<Provider: AXTreeProvider>(provider: Provider) -> WalkResult {
         var truncated = false
-        let firstPass = walkOnce(provider: provider, truncated: &truncated)
+        var windowIDs: [[Int]: CGWindowID] = [:]
+        let firstPass = walkOnce(provider: provider, windowIDsByPath: &windowIDs, truncated: &truncated)
 
         guard isEffectivelyEmpty(firstPass) else {
-            return WalkResult(nodes: firstPass, fallbackFired: false, fallbackHelped: false, truncated: truncated)
+            return WalkResult(
+                nodes: firstPass, windowIDsByPath: windowIDs,
+                fallbackFired: false, fallbackHelped: false, truncated: truncated
+            )
         }
 
         provider.enableManualAccessibilityFallback()
-        let secondPass = walkOnce(provider: provider, truncated: &truncated)
+        let secondPass = walkOnce(provider: provider, windowIDsByPath: &windowIDs, truncated: &truncated)
         return WalkResult(
             nodes: secondPass,
+            windowIDsByPath: windowIDs,
             fallbackFired: true,
             fallbackHelped: !isEffectivelyEmpty(secondPass),
             truncated: truncated
@@ -61,9 +81,16 @@ public enum AXTreeWalker {
 
     private static func walkOnce<Provider: AXTreeProvider>(
         provider: Provider,
+        windowIDsByPath: inout [[Int]: CGWindowID],
         truncated: inout Bool
     ) -> [AXNode] {
-        provider.roots().map { buildNode(provider: provider, element: $0, depth: 0, truncated: &truncated) }
+        // Capture each root WINDOW's id once (the menu bar reports nil); descendants
+        // inherit it via their path prefix, so only root entries are recorded.
+        windowIDsByPath.removeAll()
+        return provider.roots().enumerated().map { index, element in
+            if let id = provider.windowID(of: element) { windowIDsByPath[[index]] = id }
+            return buildNode(provider: provider, element: element, depth: 0, truncated: &truncated)
+        }
     }
 
     private static func buildNode<Provider: AXTreeProvider>(

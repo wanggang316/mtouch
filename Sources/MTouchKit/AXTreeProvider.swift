@@ -58,6 +58,21 @@ public protocol AXTreeProvider {
     /// then re-walks. Implementations must tolerate the attribute being
     /// unsupported (no crash) — a no-op simply leaves the retry empty.
     func enableManualAccessibilityFallback()
+
+    /// The stable, unique CGWindowID of a TOP-LEVEL root element when it is a
+    /// window, else nil (the menu bar, or a non-live provider). Consulted ONCE per
+    /// root by the walker so the persisted snapshot can stamp each ref with its
+    /// owning-window identity — the discriminator that tells two identically-titled
+    /// windows apart when relocating a ref (VAL-ACT-011). Defaulted to nil so
+    /// non-live/test providers need not implement it; their refs simply carry no
+    /// window id and relocate by ancestor/position alone.
+    func windowID(of element: Element) -> CGWindowID?
+}
+
+public extension AXTreeProvider {
+    /// Default: no window id. Non-live providers (and roots that are not windows)
+    /// contribute none, leaving `RefEntry.ownerWindowID` nil for those refs.
+    func windowID(of element: Element) -> CGWindowID? { nil }
 }
 
 /// Renders raw AX attribute values that arrive as `CFTypeRef` into the
@@ -149,6 +164,13 @@ public struct LiveTreeProvider: AXTreeProvider {
         // report `kAXErrorAttributeUnsupported`, in which case the retry simply
         // stays empty (fallback fired, did not help).
         _ = AXUIElementSetAttributeValue(appElement, "AXManualAccessibility" as CFString, kCFBooleanTrue)
+    }
+
+    /// A window root's CGWindowID via the private `_AXUIElementGetWindow` wrapper;
+    /// nil for the menu-bar root (not a window). This is the live source of the
+    /// owning-window identity the snapshot stamps onto each ref.
+    public func windowID(of element: AXUIElement) -> CGWindowID? {
+        AXSupport.windowID(of: element)
     }
 
     private static func actionNames(of element: AXUIElement) -> [String] {

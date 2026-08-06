@@ -333,6 +333,82 @@ private func diff(_ pre: [AXNode], _ post: [AXNode]) -> DiffResult {
     }
 }
 
+// MARK: - (g2) Owning-window-aware ref carry-over (VAL-ACT-011 e2e — reconcile)
+
+@Suite struct DiffEngineWindowIdentityTests {
+    /// The localized "Untitled" both TextEdit windows share, so the two windows are
+    /// IDENTICAL apart from their owning-window id — the exact collision the gate
+    /// must resolve.
+    private let untitled = "未命名"
+
+    /// Two identically-titled windows, each with one actionable control, built with
+    /// per-root window ids so each ref records its owning window (front 100, back 200).
+    private func twoWindowPre() -> Snapshot {
+        Snapshot(
+            roots: [window([button("Go")], title: untitled), window([button("Go")], title: untitled)],
+            windowIDsByPath: [[0]: 100, [1]: 200]
+        )
+    }
+
+    @Test func windowCarryGateAppliesOnlyWhenBothIDsKnown() {
+        #expect(DiffEngine.windowCarryAllowed(stored: 100, post: 100))     // same window -> carry
+        #expect(!DiffEngine.windowCarryAllowed(stored: 100, post: 200))    // different window -> stale
+        #expect(DiffEngine.windowCarryAllowed(stored: nil, post: 200))     // no stored id -> degrade
+        #expect(DiffEngine.windowCarryAllowed(stored: 100, post: nil))     // no live id  -> degrade
+    }
+
+    @Test func frontWindowClosedDropsItsRefInsteadOfRehomingOntoTheTwin() throws {
+        let pre = twoWindowPre()
+        #expect(pre.refs["e1"]?.ownerWindowID == 100)   // front control
+        #expect(pre.refs["e2"]?.ownerWindowID == 200)   // back control
+
+        // The FRONT window closes; the surviving BACK window slides into root 0, so a
+        // structurally-identical control now sits at the front ref's old path [0,0].
+        // Its owning window id (200) differs from e1's stored id (100).
+        let post = [window([button("Go")], title: untitled)]
+        let result = DiffEngine.diff(pre: pre, post: post, postWindowIDsByPath: [[0]: 200])
+
+        // e1 (front) must NOT be re-homed onto the twin: it goes stale, and the
+        // surviving control gets a FRESH ref pinned to the back window (200).
+        #expect(result.newSnapshot.refs["e1"] == nil)
+        #expect(result.newSnapshot.ref(atPath: [0, 0]) != "e1")
+        #expect(result.diff.staleRefs.contains("e1"))
+        let freshRef = try #require(result.newSnapshot.ref(atPath: [0, 0]))
+        #expect(result.newSnapshot.refs[freshRef]?.ownerWindowID == 200)
+    }
+
+    @Test func survivingRefKeepsItsOwningWindowIDAcrossAReconcileRoundTrip() {
+        // One window (id 100) with a control (e1) and a text field (e2). An unrelated
+        // change to the text field; the control persists at its path in the SAME window.
+        let pre = Snapshot(
+            roots: [window([button("Go"), textField("old")], title: untitled)],
+            windowIDsByPath: [[0]: 100]
+        )
+        #expect(pre.refs["e1"]?.ownerWindowID == 100)
+
+        let post = [window([button("Go"), textField("new")], title: untitled)]
+        let result = DiffEngine.diff(pre: pre, post: post, postWindowIDsByPath: [[0]: 100])
+
+        // The survivor keeps its ref AND its owning-window id is preserved (re-derived
+        // from the post walk), NOT dropped — so the act-layer gate still works next time.
+        #expect(result.newSnapshot.refs["e1"]?.ownerWindowID == 100)
+
+        // A second round-trip keeps the identity stable (no erosion).
+        let second = DiffEngine.diff(pre: result.newSnapshot, post: post, postWindowIDsByPath: [[0]: 100])
+        #expect(second.newSnapshot.refs["e1"]?.ownerWindowID == 100)
+    }
+
+    @Test func withoutPostWindowIDsCarryOverDegradesToTheOldPositionalBehaviour() {
+        // No post window map (an empty-id walk, or a caller that passes none): the
+        // gate no-ops and refs carry positionally exactly as before this wiring —
+        // the required backward-compatible degradation.
+        let pre = twoWindowPre()
+        let post = [window([button("Go")], title: untitled)]
+        let result = DiffEngine.diff(pre: pre, post: post)   // no postWindowIDsByPath
+        #expect(result.newSnapshot.refs["e1"]?.title == "Go")   // e1 carried onto [0,0]
+    }
+}
+
 // MARK: - (h) Noise churn is filtered out of the diff
 
 @Suite struct DiffEngineNoiseTests {

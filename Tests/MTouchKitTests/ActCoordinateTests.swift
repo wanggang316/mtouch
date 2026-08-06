@@ -21,6 +21,11 @@ private func window(_ children: [AXNode]) -> AXNode {
     AXNode(role: kAXWindowRole, title: "W", frame: CGRect(x: 0, y: 0, width: 400, height: 300), children: children)
 }
 
+/// Wrap a walked tree as a `WalkResult` — the shape `rewalk` now yields.
+private func walked(_ nodes: [AXNode]) -> WalkResult {
+    WalkResult(nodes: nodes, fallbackFired: false, fallbackHelped: false, truncated: false)
+}
+
 private let testApp = "com.example.App"
 private let testPID: pid_t = 4242
 
@@ -276,7 +281,7 @@ private struct DeliveryBoom: Error {}
             loadSession: { _ in session(for: [window([textArea("")])]) },
             isRunning: { _, _ in true },
             onScreen: { _ in true },
-            rewalk: { _ in [window([textArea("")])] },
+            rewalk: { _ in walked([window([textArea("")])]) },
             deliver: { try recorder.deliver($0, $1) },
             persist: { _, _, _, _ in Issue.record("a failed delivery must not persist") },
             sleep: { _ in }
@@ -301,7 +306,7 @@ private struct DeliveryBoom: Error {}
             onScreen: { _ in true },
             rewalk: { _ in
                 walks += 1
-                return walks == 1 ? pre : post
+                return walks == 1 ? walked(pre) : walked(post)
             },
             deliver: { try recorder.deliver($0, $1) },
             persist: { snapshot, _, _, _ in persisted = snapshot },
@@ -325,7 +330,7 @@ private struct DeliveryBoom: Error {}
             loadSession: { _ in session(for: pre) },
             isRunning: { _, _ in true },
             onScreen: { _ in true },
-            rewalk: { _ in pre }, // nothing changed
+            rewalk: { _ in walked(pre) }, // nothing changed
             deliver: { try recorder.deliver($0, $1) },
             persist: { _, _, _, _ in }, sleep: { _ in }
         )
@@ -345,7 +350,7 @@ private struct DeliveryBoom: Error {}
             resolvePID: { _ in 9999 },
             isRunning: { _, _ in true },
             onScreen: { _ in true },
-            rewalk: { _ in walks += 1; return post },
+            rewalk: { _ in walks += 1; return walked(post) },
             deliver: { try recorder.deliver($0, $1) },
             persist: { _, _, _, _ in }, sleep: { _ in }
         )

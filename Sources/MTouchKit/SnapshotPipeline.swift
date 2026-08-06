@@ -60,7 +60,13 @@ public enum SnapshotPipeline {
         }
 
         // 4. Enrich scroll areas with a derived scroll position (see ScrollEnrichment).
-        let snapshot = Snapshot(roots: ScrollEnrichment.enrich(result.nodes))
+        //    Thread the walk's per-root owning-window ids through so each ref records
+        //    its owning-window identity (VAL-ACT-011). Enrichment maps roots 1:1 in
+        //    order, so the root-keyed ids stay aligned with the enriched tree.
+        let snapshot = Snapshot(
+            roots: ScrollEnrichment.enrich(result.nodes),
+            windowIDsByPath: result.windowIDsByPath
+        )
         let note = fallbackNote(result)
 
         // 5. Persist the session BEFORE printing refs: an unwritable path is a

@@ -14,6 +14,14 @@ private func window(_ children: [AXNode]) -> AXNode {
     AXNode(role: kAXWindowRole, title: "W", frame: CGRect(x: 0, y: 0, width: 400, height: 300), children: children)
 }
 
+/// Wrap a walked tree (optionally with per-root window ids) as a `WalkResult` —
+/// the shape `rewalk` now yields so the post-action reconcile sees owning-window
+/// ids. Defaults to no ids, preserving the single-window fixtures' behaviour.
+private func walked(_ nodes: [AXNode], windowIDs: [[Int]: CGWindowID] = [:]) -> WalkResult {
+    WalkResult(nodes: nodes, windowIDsByPath: windowIDs,
+               fallbackFired: false, fallbackHelped: false, truncated: false)
+}
+
 /// Three actionable refs e1..e3 (First/Second/Third buttons in a window).
 private func sampleSnapshot() -> Snapshot {
     Snapshot(roots: [window([button("First"), button("Second"), button("Third")])])
@@ -209,7 +217,7 @@ private func terminalCode(_ target: ActPipeline.Target) -> MTouchExitCode? {
             pre: pre, pid: 1, expectsMenu: true,
             rewalk: { _ in
                 calls += 1
-                return calls < 3 ? [window([button("A")])] : changed
+                return calls < 3 ? walked([window([button("A")])]) : walked(changed)
             },
             sleep: { _ in sleeps += 1 }
         )
@@ -224,7 +232,7 @@ private func terminalCode(_ target: ActPipeline.Target) -> MTouchExitCode? {
         var calls = 0
         let result = ActPipeline.settledDiff(
             pre: pre, pid: 1, expectsMenu: false,
-            rewalk: { _ in calls += 1; return [window([button("A")])] },
+            rewalk: { _ in calls += 1; return walked([window([button("A")])]) },
             sleep: { _ in }
         )
         #expect(result.diff.isEmpty)
@@ -547,7 +555,7 @@ private func terminalCode(_ target: ActPipeline.Target) -> MTouchExitCode? {
                 loadSession: { SessionStore.load(from: $0) },
                 isRunning: { _, _ in true },
                 walkLive: { _ in sampleFakeTree(resolving: [[0, 0]]) },
-                rewalk: { _ in [window([button("First"), button("Second"), button("Third")])] },
+                rewalk: { _ in walked([window([button("First"), button("Second"), button("Third")])]) },
                 performAction: { _, verb, _ in actedVerb = verb; return .success(()) },
                 persist: { snapshot, _, _, _ in persisted = snapshot },
                 sleep: { _ in }
