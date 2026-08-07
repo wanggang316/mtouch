@@ -169,6 +169,21 @@ public enum MCPToolDispatch {
         return TrajectoryArgs(values)
     }
 
+    /// Whether a tool MUST run on the main thread. AX reads/act and screenshot
+    /// need it (screenshot for its window-server connection + run-loop-pump
+    /// bridge), so they default to the main thread — and so does any future or
+    /// unknown tool, which is the safe choice. `wait` is the sole exception: it
+    /// only SLEEPS its timeout budget between polls while its AX walk runs
+    /// off-main via `GuardedWalk`, so running it on the main thread would park
+    /// the shared MCP run loop for the whole timeout and head-of-line-block every
+    /// concurrent tool call. It therefore runs off the main thread.
+    ///
+    /// This is a pure classification (no SDK dependency), so the routing decision
+    /// is unit-testable without the transport.
+    public static func requiresMainThread(tool: String) -> Bool {
+        tool != "wait"
+    }
+
     public static func dispatch(
         tool: String,
         arguments: ToolArguments,

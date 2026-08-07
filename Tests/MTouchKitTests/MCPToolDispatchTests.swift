@@ -69,6 +69,32 @@ private func call(_ tool: String, _ args: [String: ToolArgumentValue],
     }
 }
 
+// MARK: - Thread routing
+
+@Suite struct MCPToolThreadRoutingTests {
+    // `wait` is the sole tool that runs OFF the main thread: it only sleeps its
+    // timeout budget while its AX walk runs off-main via GuardedWalk, so hopping
+    // it to main would head-of-line-block concurrent tool calls.
+    @Test func waitRunsOffTheMainThread() {
+        #expect(MCPToolDispatch.requiresMainThread(tool: "wait") == false)
+    }
+
+    // Every other advertised tool needs the main thread (AX reads/act, and the
+    // screenshot window-server + run-loop-pump bridge).
+    @Test func allNonWaitToolsRequireTheMainThread() {
+        for tool in MCPToolCatalog.toolNames where tool != "wait" {
+            #expect(MCPToolDispatch.requiresMainThread(tool: tool), "\(tool) should require the main thread")
+        }
+    }
+
+    // An unknown tool defaults to the safe main-thread path (it only produces an
+    // isError string, so the thread is immaterial — but the default must not
+    // accidentally send future tools off-main).
+    @Test func unknownToolDefaultsToMainThread() {
+        #expect(MCPToolDispatch.requiresMainThread(tool: "does-not-exist"))
+    }
+}
+
 // MARK: - ToolArguments coercion
 
 @Suite struct ToolArgumentsTests {

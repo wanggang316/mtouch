@@ -107,25 +107,39 @@ enum MCPServer {
                 throw MCPError.invalidRequest("Server is not initialized")
             }
             let arguments = ToolArguments(convert(params.arguments ?? [:]))
-            // Run the pipeline on the MAIN THREAD: AX reads and ScreenCaptureKit
-            // need it. The heavy tree walks run on their own background queues
-            // (BoundedWalk/GuardedWalk), so the main thread only orchestrates.
-            //
-            // We hop via a raw main-queue dispatch rather than `MainActor.run`: the
-            // screenshot path pumps the run loop itself (CFRunLoopRunInMode) to drive
-            // an inner main-actor capture task, and that nested pump only drains the
-            // inner task from a PLAIN main-thread context — exactly what the CLI does.
-            // Holding the Swift main actor (via `MainActor.run`) parks that inner task
-            // and the capture never completes (times out).
-            let result = await runOnMainThread {
-                // `dispatchRecorded` wraps `dispatch` with trajectory recording when
-                // MTOUCH_TRAJECTORY is set (a no-op otherwise), so an MCP session
-                // records each tool call under the SAME shape as the CLI.
+            // `dispatchRecorded` wraps `dispatch` with trajectory recording when
+            // MTOUCH_TRAJECTORY is set (a no-op otherwise), so an MCP session
+            // records each tool call under the SAME shape as the CLI.
+            let dispatch: @Sendable () -> ToolResult = {
                 MCPToolDispatch.dispatchRecorded(
                     tool: params.name,
                     arguments: arguments,
                     environment: ProcessInfo.processInfo.environment
                 )
+            }
+            // Thread routing (see MCPToolDispatch.requiresMainThread):
+            //  - Main-thread tools (AX reads/act + screenshot) hop via
+            //    `runOnMainThread`. AX reads and ScreenCaptureKit need the main
+            //    thread; the heavy tree walks still run on their own background
+            //    queues (BoundedWalk/GuardedWalk), so the main thread only
+            //    orchestrates. We hop via a raw run-loop block rather than
+            //    `MainActor.run`: the screenshot path pumps the run loop itself
+            //    (CFRunLoopRunInMode) to drive an inner main-actor capture task,
+            //    and that nested pump only drains from a PLAIN main-thread context.
+            //    Holding the Swift main actor would park that inner task so the
+            //    capture never completes (times out).
+            //  - `wait` runs OFF the main thread, directly on this handler's
+            //    cooperative-pool task. It only SLEEPS its timeout budget between
+            //    polls (its AX walk already runs off-main via GuardedWalk), so
+            //    hopping to main would park the shared main run loop for the whole
+            //    timeout and stall every concurrent tool call behind it
+            //    (head-of-line blocking). Running it here leaves the main run loop
+            //    free to service concurrent snapshot/screenshot calls.
+            let result: ToolResult
+            if MCPToolDispatch.requiresMainThread(tool: params.name) {
+                result = await runOnMainThread(dispatch)
+            } else {
+                result = dispatch()
             }
             return CallTool.Result(content: result.payloads.map(makeContent), isError: result.isError)
         }
