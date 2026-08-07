@@ -1,0 +1,63 @@
+name: Release
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Tag to release (e.g. v0.1.0)'
+        required: true
+
+permissions:
+  contents: write
+
+jobs:
+  package:
+    name: Build & package universal binary
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Toolchain
+        run: swift --version
+
+      - name: Resolve version
+        id: ver
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            echo "tag=${{ github.event.inputs.tag }}" >> "$GITHUB_OUTPUT"
+          else
+            echo "tag=${GITHUB_REF_NAME}" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Build universal release binary (arm64 + x86_64)
+        run: swift build -c release --arch arm64 --arch x86_64
+
+      - name: Package tarball
+        run: |
+          set -euo pipefail
+          VER="${{ steps.ver.outputs.tag }}"
+          BINDIR="$(swift build -c release --arch arm64 --arch x86_64 --show-bin-path)"
+          NAME="mtouch-${VER}-macos-universal"
+          mkdir -p "dist/${NAME}"
+          cp "${BINDIR}/mtouch" "dist/${NAME}/mtouch"
+          cp README.md LICENSE "dist/${NAME}/"
+          lipo -info "dist/${NAME}/mtouch" || true
+          tar -C dist -czf "${NAME}.tar.gz" "${NAME}"
+          shasum -a 256 "${NAME}.tar.gz" | tee "${NAME}.tar.gz.sha256"
+
+      - name: Create GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          VER="${{ steps.ver.outputs.tag }}"
+          gh release create "$VER" \
+            mtouch-*-macos-universal.tar.gz \
+            mtouch-*-macos-universal.tar.gz.sha256 \
+            --title "mtouch $VER" \
+            --generate-notes \
+            || gh release upload "$VER" \
+                 mtouch-*-macos-universal.tar.gz \
+                 mtouch-*-macos-universal.tar.gz.sha256 --clobber

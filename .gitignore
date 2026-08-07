@@ -4,3 +4,6 @@
 tests/runs/
 tests/**/*.png
 .DS_Store
+dist/
+mtouch-*-macos-universal.tar.gz
+mtouch-*-macos-universal.tar.gz.sha256

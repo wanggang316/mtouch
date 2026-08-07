@@ -1,5 +1,9 @@
 # mtouch
 
+[![CI](https://github.com/wanggang316/mtouch/actions/workflows/ci.yml/badge.svg)](https://github.com/wanggang316/mtouch/actions/workflows/ci.yml)
+[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
+![Platform](https://img.shields.io/badge/platform-macOS%2014%2B-lightgrey)
+
 `mtouch` is a native Swift, **agent-facing macOS UI automation tool** built for stable automated testing. It lets an AI agent (or any script) perceive and drive arbitrary third-party macOS apps through the Accessibility API, with a compact text/JSON contract designed for LLM token budgets.
 
 The agent-facing contract is **AX-tree-as-text + snapshot-scoped refs + post-action AX diff as verification** — the pattern that proved most reliable in practice — with explicit wait primitives (no sleeps), a ScreenCaptureKit vision fallback, and trajectory recording as the foundation for deterministic replay.
@@ -20,13 +24,32 @@ The agent-facing contract is **AX-tree-as-text + snapshot-scoped refs + post-act
 - Swift 6 / Xcode 16+
 - **Accessibility** permission granted to the invoking terminal app (required); **Screen Recording** only for `screenshot`
 
+## Install
+
+Download the universal binary from the [latest release](https://github.com/wanggang316/mtouch/releases/latest):
+
+```sh
+VER=v0.1.0
+curl -fsSL -O "https://github.com/wanggang316/mtouch/releases/download/${VER}/mtouch-${VER}-macos-universal.tar.gz"
+tar xzf "mtouch-${VER}-macos-universal.tar.gz"
+./mtouch-${VER}-macos-universal/mtouch --help
+```
+
+Or build from source (below). Grant the invoking terminal **Accessibility** in System Settings → Privacy & Security before driving apps (`mtouch doctor` reports status).
+
 ## Build & test
 
 ```sh
 swift build
-swift test              # 370 unit tests, hermetic (no AX/TCC/network)
+swift test              # hermetic unit tests (no AX/TCC/network)
 swift run mtouch --help
+
+make release            # universal (arm64 + x86_64) release binary
+make package VERSION=v0.1.0   # -> mtouch-v0.1.0-macos-universal.tar.gz (+ .sha256)
+make ungranted          # run the ungranted-persona live probes
 ```
+
+Continuous integration (GitHub Actions, `macos-15`) runs the unit suite and — because a fresh CI runner is an *ungranted* host — live-verifies the ungranted-persona fail-fast behavior (`ci/ungranted-probes.sh`) that a granted developer machine cannot reproduce. Tagging `v*` builds and publishes a universal binary as a GitHub Release.
 
 ## Quick start
 
