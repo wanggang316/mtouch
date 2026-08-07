@@ -1,7 +1,13 @@
 import AppKit
 import CoreGraphics
 import Foundation
-import ScreenCaptureKit
+// @preconcurrency downgrades ScreenCaptureKit's Sendable-related errors to
+// warnings. On the Xcode 16.4 / macOS 15.5 SDK (CI), SCK types like
+// SCShareableContent are not Sendable, so passing their results across the
+// nonisolated/main-actor boundary is a hard Swift 6 error; on newer SDKs those
+// types are Sendable and this attribute is a no-op. Keeps the build portable
+// across SDK versions without changing runtime behavior.
+@preconcurrency import ScreenCaptureKit
 
 /// The live ScreenCaptureKit seam behind `ScreenshotPipeline`'s injectable
 /// `capture` closure. It enumerates shareable content, builds a per-display or
