@@ -34,8 +34,8 @@ public enum WaitPipeline {
         resolvePID: (String) throws -> pid_t = { try AXWindowEnumerator.resolveRunningPID(bundleId: $0) },
         now: @escaping () -> TimeInterval = { ProcessInfo.processInfo.systemUptime },
         sleep: @escaping (TimeInterval) -> Void = { Thread.sleep(forTimeInterval: $0) },
-        makeProbe: (pid_t) -> () -> [AXNode]? = { pid in
-            let guarded = GuardedWalk(work: { AXTreeWalker.walk(pid: pid).nodes })
+        makeProbe: (pid_t, TimeInterval) -> () -> [AXNode]? = { pid, deadline in
+            let guarded = GuardedWalk(deadline: deadline, work: { AXTreeWalker.walk(pid: pid).nodes })
             return { guarded.sample() }
         }
     ) -> WaitOutcome {
@@ -65,7 +65,18 @@ public enum WaitPipeline {
         // 3. Poll the tree. The probe walks (guarded, single-flight) and evaluates
         //    the condition; the last successful walk is retained for a rich timeout
         //    diagnostic. A failed/hung walk counts as "not met" and keeps polling.
-        let probe = makeProbe(pid)
+        //
+        //    Cap the guarded walk's per-sample deadline to the wait's OWN budget.
+        //    `GuardedWalk.sample()` BLOCKS the first poll up to `deadline`, so the
+        //    stock 8s ceiling would let a hung/SIGSTOPped target overshoot a short
+        //    `--timeout 1s` by ~8× before the poll can observe its own timeout.
+        //    - `min(defaultDeadline, …)` keeps the 8s ceiling for long waits.
+        //    - `max(timeout, 1.0)` floors it so a healthy walk (tens of ms) still
+        //      gets a fair ≥1s window; without the floor a `--timeout 0` (or
+        //      sub-100ms) wait would starve even a healthy walk and regress the
+        //      "timeout 0 yields exactly one satisfiable check" behavior.
+        let walkDeadline = min(BoundedWalk.defaultDeadline, max(timeout, 1.0))
+        let probe = makeProbe(pid, walkDeadline)
         var lastSeen: [AXNode]?
         let result = WaitPoll.poll(timeout: timeout, interval: interval, now: now, sleep: sleep) {
             guard let nodes = probe() else { return false }

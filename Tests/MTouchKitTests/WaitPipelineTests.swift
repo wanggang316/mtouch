@@ -33,7 +33,7 @@ private func window(title: String, _ children: [AXNode] = []) -> AXNode {
             permissions: StubPermissions(accessibility: false),
             resolvePID: { _ in Issue.record("resolvePID must not run without the grant"); return 1 },
             now: clock.now, sleep: clock.sleep,
-            makeProbe: { _ in { Issue.record("must not poll without the grant"); return nil } }
+            makeProbe: { _, _ in { Issue.record("must not poll without the grant"); return nil } }
         )
 
         guard case let .failed(_, code) = outcome else {
@@ -52,7 +52,7 @@ private func window(title: String, _ children: [AXNode] = []) -> AXNode {
             permissions: StubPermissions(accessibility: true),
             resolvePID: { _ in throw AppNotRunningError(bundleId: "com.example.nope") },
             now: clock.now, sleep: clock.sleep,
-            makeProbe: { _ in { Issue.record("must not poll a non-running app"); return nil } }
+            makeProbe: { _, _ in { Issue.record("must not poll a non-running app"); return nil } }
         )
 
         guard case let .failed(stderr, code) = outcome else {
@@ -72,7 +72,7 @@ private func window(title: String, _ children: [AXNode] = []) -> AXNode {
             permissions: StubPermissions(accessibility: true),
             resolvePID: { _ in 42 },
             now: clock.now, sleep: clock.sleep,
-            makeProbe: { _ in { [window(title: "Untitled", [self.textArea])] } }
+            makeProbe: { _, _ in { [window(title: "Untitled", [self.textArea])] } }
         )
 
         #expect(outcome == .satisfied)
@@ -89,7 +89,7 @@ private func window(title: String, _ children: [AXNode] = []) -> AXNode {
             permissions: StubPermissions(accessibility: true),
             resolvePID: { _ in 42 },
             now: clock.now, sleep: clock.sleep,
-            makeProbe: { _ in { [window(title: "Untitled", [self.textArea])] } }
+            makeProbe: { _, _ in { [window(title: "Untitled", [self.textArea])] } }
         )
 
         guard case let .failed(stderr, code) = outcome else {
@@ -121,13 +121,48 @@ private func window(title: String, _ children: [AXNode] = []) -> AXNode {
             permissions: StubPermissions(accessibility: true),
             resolvePID: { _ in 42 },
             now: clock.now, sleep: clock.sleep,
-            makeProbe: { _ in { nil } }
+            makeProbe: { _, _ in { nil } }
         )
 
         guard case let .failed(_, code) = outcome else {
             Issue.record("expected a timeout failure"); return
         }
         #expect(code == .waitTimeout)
+    }
+
+    @Test func perWalkDeadlineIsCappedToTheWaitBudget() throws {
+        // GuardedWalk.sample() BLOCKS the first poll up to its deadline, so the
+        // deadline handed to makeProbe must be min(8, max(timeout, 1)): the 8s
+        // ceiling for long waits, floored at 1s so a healthy walk is never
+        // starved by a sub-second timeout. Capture that deadline deterministically
+        // — no real GuardedWalk thread, no real clock — and assert the cap math.
+        final class DeadlineBox { var value: TimeInterval? }
+
+        let cases: [(timeout: TimeInterval, expected: TimeInterval)] = [
+            (0, 1), (0.5, 1), (1, 1), (3, 3), (8, 8), (20, 8),
+        ]
+
+        for (timeout, expected) in cases {
+            let clock = Clock()
+            let box = DeadlineBox()
+            let outcome = WaitPipeline.run(
+                bundleId: "com.apple.TextEdit",
+                condition: .appears(WaitCriteria(parsing: "window")),
+                timeout: timeout, interval: 0.1,
+                permissions: StubPermissions(accessibility: true),
+                resolvePID: { _ in 42 },
+                now: clock.now, sleep: clock.sleep,
+                makeProbe: { _, deadline in
+                    box.value = deadline
+                    // A satisfying tree so run() exits on the first poll.
+                    return { [window(title: "Untitled")] }
+                }
+            )
+
+            #expect(outcome == .satisfied)
+            let captured = try #require(box.value)
+            #expect(captured == expected, "timeout \(timeout) should cap the walk deadline to \(expected)")
+        }
     }
 }
 
