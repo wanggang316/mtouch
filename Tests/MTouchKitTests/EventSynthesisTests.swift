@@ -120,13 +120,15 @@ private func unicodeString(of event: CGEvent) -> String {
 @Suite struct KeyComboParsingTests {
     @Test func parsesModifiersAndKey() throws {
         let combo = try KeyCombo(parsing: "cmd+shift+a")
-        try #expect(combo.keyCode == #require(KeyCombo.keyCodes["a"]))
+        let expectedA = try #require(KeyCombo.keyCodes["a"])
+        #expect(combo.keyCode == expectedA)
         #expect(combo.flags == [.maskCommand, .maskShift])
     }
 
     @Test func isCaseInsensitiveAndWhitespaceTolerant() throws {
         let combo = try KeyCombo(parsing: "  CMD + Shift + A ")
-        try #expect(combo.keyCode == #require(KeyCombo.keyCodes["a"]))
+        let expectedA = try #require(KeyCombo.keyCodes["a"])
+        #expect(combo.keyCode == expectedA)
         #expect(combo.flags == [.maskCommand, .maskShift])
     }
 
@@ -136,23 +138,27 @@ private func unicodeString(of event: CGEvent) -> String {
         let altEscape = try KeyCombo(parsing: "alt+escape")
         #expect(optionEsc == optEscape)
         #expect(optEscape == altEscape)
-        try #expect(optionEsc.keyCode == #require(KeyCombo.keyCodes["escape"]))
+        let expectedEscape = try #require(KeyCombo.keyCodes["escape"])
+        #expect(optionEsc.keyCode == expectedEscape)
         #expect(optionEsc.flags == .maskAlternate)
     }
 
     @Test func acceptsBareKeyWithoutModifiers() throws {
         let combo = try KeyCombo(parsing: "RETURN")
-        try #expect(combo.keyCode == #require(KeyCombo.keyCodes["return"]))
+        let expectedReturn = try #require(KeyCombo.keyCodes["return"])
+        #expect(combo.keyCode == expectedReturn)
         #expect(combo.flags.isEmpty)
     }
 
     @Test func mapsFunctionAndNavigationKeys() throws {
         let fn = try KeyCombo(parsing: "fn+f1")
-        try #expect(fn.keyCode == #require(KeyCombo.keyCodes["f1"]))
+        let expectedF1 = try #require(KeyCombo.keyCodes["f1"])
+        #expect(fn.keyCode == expectedF1)
         #expect(fn.flags == .maskSecondaryFn)
 
         let nav = try KeyCombo(parsing: "ctrl+pagedown")
-        try #expect(nav.keyCode == #require(KeyCombo.keyCodes["pagedown"]))
+        let expectedPageDown = try #require(KeyCombo.keyCodes["pagedown"])
+        #expect(nav.keyCode == expectedPageDown)
         #expect(nav.flags == .maskControl)
     }
 

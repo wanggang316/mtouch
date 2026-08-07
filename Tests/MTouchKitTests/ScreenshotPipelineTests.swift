@@ -315,7 +315,8 @@ private func isSuccess<Success, Failure>(_ result: Result<Success, Failure>) -> 
         }
         #expect(path == "/tmp/report.png")
         #expect(message == #"wrote /tmp/report.png (20x10 px, display "main", scale 2)"#)
-        #expect(isPNG(try #require(captured)))
+        let image = try #require(captured)
+        #expect(isPNG(image))
     }
 
     // VAL-SHOT-003: PNG bytes regardless of extension, written through the real writer.
