@@ -19,8 +19,10 @@ import Testing
         // short deadline every poll times out; the single-flight guard must ensure
         // NO second background walk is ever spawned, no matter how many polls run.
         let release = DispatchSemaphore(value: 0)
+        let drained = DispatchSemaphore(value: 0)
         let guarded = GuardedWalk(deadline: 0.05, work: {
-            release.wait() // block as if the target is unresponsive
+            release.wait()   // block as if the target is unresponsive
+            drained.signal() // let the test observe the hung walk actually unblocked
             return []
         })
 
@@ -30,7 +32,11 @@ import Testing
         // The cap held: exactly one background walk was ever started.
         #expect(guarded.spawnCount == 1)
 
-        // Let the hung walk finish so the queue drains and nothing leaks.
+        // Let the hung walk finish AND wait for it to drain before the test returns.
+        // Signaling alone leaves the just-released background thread racing the
+        // swift-testing teardown; an abandoned/in-flight queue thread SIGBUSes on the
+        // Xcode 16.x testing runtime, so we block until it has observed the release.
         release.signal()
+        drained.wait()
     }
 }

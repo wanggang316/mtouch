@@ -262,12 +262,25 @@ private func runPipeline(
     }
 
     @Test func returnsNilWhenWorkExceedsDeadline() {
-        // Short deadline, slow work ⇒ nil (the hung-target signal). The abandoned
-        // work sleeps out on its own queue; the test does not wait for it.
+        // Short deadline, work that blocks past it ⇒ nil (the hung-target signal).
+        // BoundedWalk abandons the still-running work on timeout — correct for the
+        // one-shot CLI, which exits the process immediately after, so a lingering
+        // global-queue thread is harmless there. Under swift-testing there is no
+        // such exit, so we deterministically release and drain the abandoned work
+        // here: an abandoned global-queue thread left running into the test
+        // runtime's teardown SIGBUSes on the Xcode 16.x testing runtime.
+        let release = DispatchSemaphore(value: 0)
+        let drained = DispatchSemaphore(value: 0)
         let result: Int? = BoundedWalk.run(deadline: 0.15) {
-            Thread.sleep(forTimeInterval: 1.0)
+            release.wait()   // block past the deadline as a hung target would
+            drained.signal() // let the test observe the abandoned work finished
             return 7
         }
-        #expect(result == nil)
+        #expect(result == nil) // the walk was abandoned on timeout
+
+        // Unblock the abandoned work and wait for it to finish before the test
+        // returns, so no still-running background thread survives into teardown.
+        release.signal()
+        drained.wait()
     }
 }

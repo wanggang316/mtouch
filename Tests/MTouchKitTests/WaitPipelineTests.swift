@@ -107,6 +107,12 @@ private func window(title: String, _ children: [AXNode] = []) -> AXNode {
     @Test func hungWalkYieldsTimeoutNotACrash() {
         // A probe that always fails (nil, as GuardedWalk returns on a hung target)
         // counts as "not met" and the wait times out cleanly (exit 4).
+        //
+        // This models the RESULT of a hung walk (nil) with a synchronous probe, so
+        // it spawns no background walk and cannot leak a blocked thread. The tests
+        // that DO spawn a real blocking walk — GuardedWalkTests' hung-target case and
+        // BoundedWalkTests' over-deadline case — release and drain that thread before
+        // returning, so none survives into the (SIGBUS-prone on Xcode 16.x) teardown.
         let clock = Clock()
         let outcome = WaitPipeline.run(
             bundleId: "com.apple.TextEdit",
