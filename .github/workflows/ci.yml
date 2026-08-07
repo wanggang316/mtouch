@@ -25,15 +25,22 @@ jobs:
 
   ungranted-verification:
     name: Ungranted-persona live verification
-    # The runner has NOT been granted Accessibility, so the AX-gated commands
-    # must fail fast with exit 2 — the ungranted-persona behavior a granted dev
-    # machine cannot reproduce. Clears VAL-ENV-004/005/006, VAL-ACT-024,
-    # VAL-WAIT-010, VAL-MCP-010 with real live evidence.
+    # Verifies the ungranted-persona fail-fast behavior (exit 2) that a granted
+    # developer machine cannot reproduce: VAL-ENV-004/005/006, VAL-ACT-024,
+    # VAL-WAIT-010, VAL-MCP-010. The GitHub runner turns out to REPORT
+    # Accessibility as granted, so we best-effort reset TCC on this disposable
+    # runner to produce an ungranted context; if that does not take, the probe
+    # script SKIPs gracefully (green, but records it verified nothing).
     runs-on: macos-15
     steps:
       - uses: actions/checkout@v4
       - name: Build
         run: swift build
+      - name: Try to make the runner an ungranted host (disposable VM only)
+        run: |
+          sudo tccutil reset Accessibility >/dev/null 2>&1 || true
+          tccutil reset Accessibility >/dev/null 2>&1 || true
+          echo "post-reset doctor:"; .build/debug/mtouch doctor || true
       - name: Ungranted probes
         run: |
           chmod +x ci/ungranted-probes.sh
