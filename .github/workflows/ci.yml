@@ -21,13 +21,7 @@ jobs:
       - name: Build
         run: swift build
       - name: Unit tests
-        # Serial execution: a couple of hung-target tests exercise BoundedWalk's
-        # abandon-on-timeout by leaving a briefly-blocked background thread; under
-        # swift-testing's PARALLEL runner on the Xcode 16.x runtime that thread can
-        # race a concurrent test's teardown and SIGBUS. Running serially keeps full
-        # coverage without that cross-test interference. (The hung-target behavior
-        # is also live-verified by VAL-SNAP-008 against a real SIGSTOPped app.)
-        run: swift test --no-parallel
+        run: swift test
 
   ungranted-verification:
     name: Ungranted-persona live verification
