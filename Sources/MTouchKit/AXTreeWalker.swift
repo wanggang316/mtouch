@@ -43,10 +43,14 @@ public struct WalkResult: Equatable, Sendable {
 /// depth cap (below, guarding pathological depth and cycles — AX element
 /// identity is not reliable enough to track a visited set).
 public enum AXTreeWalker {
-    /// Maximum descent depth. Real AX trees are shallow (tens of levels); this
-    /// cap only ever fires on pathological or cyclic trees, where it caps the
-    /// walk and sets `truncated` rather than recursing without bound.
-    public static let maxDepth = 256
+    /// Maximum descent depth. Real AX trees are shallow (tens of levels), so 100
+    /// is a generous ceiling that still guards pathological or cyclic trees —
+    /// where it caps the walk and sets `truncated` rather than recursing without
+    /// bound. Kept this low deliberately: `buildNode` recurses, so the cap also
+    /// bounds recursion depth, and 100 frames stay stack-safe on constrained
+    /// worker-thread stacks (the swift-testing Task stack, and small-stack
+    /// background queues) where a deeper cap can overflow the stack (SIGBUS).
+    public static let maxDepth = 100
 
     /// Walks a live application's tree by pid.
     public static func walk(pid: pid_t) -> WalkResult {
