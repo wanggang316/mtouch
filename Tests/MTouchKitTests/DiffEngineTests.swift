@@ -39,6 +39,14 @@ private func window(_ children: [AXNode], title: String = "W") -> AXNode {
     AXNode(role: kAXWindowRole, title: title, frame: CGRect(x: 0, y: 0, width: 400, height: 300), children: children)
 }
 
+private func menuBar(_ items: [AXNode]) -> AXNode {
+    AXNode(role: kAXMenuBarRole, frame: CGRect(x: 0, y: 0, width: 800, height: 24), children: items)
+}
+
+private func menuBarItem(_ title: String, enabled: Bool = true) -> AXNode {
+    AXNode(role: kAXMenuBarItemRole, title: title, frame: rect(), enabled: enabled, actionable: true)
+}
+
 private func rect(_ w: CGFloat = 100, _ h: CGFloat = 20) -> CGRect {
     CGRect(x: 0, y: 0, width: w, height: h)
 }
@@ -439,5 +447,127 @@ private func diff(_ pre: [AXNode], _ post: [AXNode]) -> DiffResult {
         #expect(result.diff.changed.count == 1)
         #expect(result.diff.added.isEmpty)             // scrollbar filtered
         #expect(!DiffText.render(result.diff).contains(kAXScrollBarRole))
+    }
+}
+
+// MARK: - (i) Cross-path fallback: a shifted subtree carries across, not remove+add
+
+@Suite struct DiffEngineCrossPathFallbackTests {
+    /// The localized "Untitled" two TextEdit windows share — identical apart from
+    /// their owning-window id, the exact collision the window-id key must resolve.
+    private let untitled = "未命名"
+
+    // (a) Root-shift window close, menu bar a sibling root AFTER the window: closing
+    // the window slides the menu bar from root [1] to root [0]. The menu bar must
+    // NOT be remove+re-added; its refs survive with the SAME numbers.
+    @Test func rootShiftWindowCloseKeepsMenuBarRefsAndOnlyRemovesTheClosedWindow() {
+        let pre = [
+            window([button("Toolbar")], title: "Doc"),          // window control -> e1
+            menuBar([menuBarItem("File"), menuBarItem("Edit")]) // File -> e2, Edit -> e3
+        ]
+        // The window closes; the menu bar shifts [1] -> [0] (a pure reindex).
+        let post = [menuBar([menuBarItem("File"), menuBarItem("Edit")])]
+
+        let result = diff(pre, post)
+
+        // The menu bar carried across the shift: its refs survive, same numbers.
+        #expect(result.newSnapshot.refs["e2"]?.title == "File")
+        #expect(result.newSnapshot.refs["e3"]?.title == "Edit")
+
+        // No spurious menu-bar remove+re-add, and nothing rendered "changed"
+        // (the menu bar's frame is stable across the reindex).
+        #expect(result.diff.added.isEmpty)
+        #expect(result.diff.changed.isEmpty)
+        #expect(!result.diff.removed.contains { $0.node.role == kAXMenuBarRole })
+        #expect(!result.diff.removed.contains { $0.node.role == kAXMenuBarItemRole })
+
+        // The diff is a MINIMAL removal of the closed window's subtree; only its
+        // control's ref went stale.
+        #expect(result.diff.removed.contains { $0.node.title == "Toolbar" })
+        #expect(result.diff.staleRefs == ["e1"])
+    }
+
+    // (b) A genuinely-removed subtree (no unique same-role+title post counterpart)
+    // still reads as removed — the fallback never invents a pairing.
+    @Test func genuinelyRemovedSubtreeStaysRemoved() {
+        let pre = [window([button("A"), group([button("Gone")])])]  // A -> e1, Gone -> e2
+        let post = [window([button("A")])]                          // group + Gone removed
+
+        let result = diff(pre, post)
+
+        #expect(result.diff.removed.contains { $0.node.title == "Gone" })
+        #expect(result.diff.staleRefs == ["e2"])
+        #expect(result.diff.added.isEmpty)
+        #expect(result.diff.changed.isEmpty)
+        #expect(result.newSnapshot.refs["e1"]?.title == "A")   // survivor kept its ref
+    }
+
+    // (c) Ambiguity: one shifted "Dup" item but TWO same-role+title post candidates
+    // -> NOT re-paired (falls back to remove+add), never a guess.
+    @Test func ambiguousSameRoleTitleIsNotRePaired() {
+        let pre = [
+            window([button("Solo")], title: "Doc"),   // window control -> e1
+            menuBar([menuBarItem("Dup")])              // Dup -> e2
+        ]
+        // The window closes (menu bar shifts [1] -> [0]) AND a second identically
+        // titled item appears: the shifted "Dup" now has TWO post candidates.
+        let post = [menuBar([menuBarItem("Dup"), menuBarItem("Dup")])]
+
+        let result = diff(pre, post)
+
+        // The ambiguous "Dup" is NOT carried: its ref goes stale and both post
+        // items read as genuinely added.
+        #expect(result.diff.staleRefs.contains("e2"))
+        #expect(result.diff.removed.contains { $0.node.title == "Dup" })
+        #expect(result.diff.added.filter { $0.node.title == "Dup" }.count == 2)
+    }
+
+    // (d) Closing a NON-LAST window (two windows + menu bar as sibling roots): the
+    // surviving window is recognized by its window id and the menu bar carries
+    // across, so the diff is DOMINATED by the closed window's removal (VAL-ACT-016).
+    @Test func nonLastWindowCloseIsRemovalDominated() {
+        let pre = Snapshot(
+            roots: [
+                window([button("Go")], title: untitled),   // FRONT window, id 100 -> e1
+                window([button("Go")], title: untitled),   // BACK window,  id 200 -> e2
+                menuBar([menuBarItem("File")])              // menu bar, id unknown -> e3
+            ],
+            windowIDsByPath: [[0]: 100, [1]: 200]
+        )
+        // The FRONT (non-last) window closes; the back window slides [1] -> [0] and
+        // the menu bar slides [2] -> [1]. Only the survivor's post window id is known.
+        let post = [window([button("Go")], title: untitled), menuBar([menuBarItem("File")])]
+        let result = DiffEngine.diff(pre: pre, post: post, postWindowIDsByPath: [[0]: 200])
+
+        // Removal-dominated: removals strictly outnumber additions + changes.
+        #expect(!result.diff.removed.isEmpty)
+        #expect(result.diff.removed.count > result.diff.added.count + result.diff.changed.count)
+
+        // The survivor's control and the menu bar carried their refs (no churn);
+        // only the closed front window's ref went stale.
+        #expect(result.newSnapshot.refs["e2"]?.title == "Go")
+        #expect(result.newSnapshot.refs["e2"]?.ownerWindowID == 200)
+        #expect(result.newSnapshot.refs["e3"]?.title == "File")
+        #expect(result.diff.staleRefs == ["e1"])
+    }
+
+    // A shifted node whose (non-key) attributes ALSO changed reads as CHANGED
+    // (keeping its carried ref) — the fallback treats a re-pair like any matched
+    // node. The role+title key still identifies it; `enabled` flipping is the change.
+    @Test func shiftedNodeWithChangedAttributeReadsAsChangedNotRemoveAdd() {
+        let pre = [
+            window([button("Toolbar")], title: "Doc"),   // window control -> e1
+            menuBar([menuBarItem("File")])               // File -> e2 (enabled)
+        ]
+        // Window closes (menu bar shifts [1] -> [0]) and the item became disabled.
+        let post = [menuBar([menuBarItem("File", enabled: false)])]
+
+        let result = diff(pre, post)
+
+        // The item carried its ref across the shift AND surfaced as a change.
+        #expect(result.diff.changed.contains { $0.ref == "e2" && $0.node.enabled == false })
+        #expect(!result.diff.added.contains { $0.node.role == kAXMenuBarItemRole })
+        #expect(!result.diff.removed.contains { $0.node.role == kAXMenuBarItemRole })
+        #expect(result.newSnapshot.refs["e2"]?.title == "File")
     }
 }
