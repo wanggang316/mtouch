@@ -417,29 +417,17 @@ public enum MCPToolDispatch {
     // MARK: - windows
 
     private static func windows(_ args: ToolArguments, permissions: PermissionProvider) -> ToolResult {
+        // The empty-`app` guard belongs only here: the CLI's `RequiredAppOptions`
+        // enforces presence at parse time, so the shared pipeline never sees it.
         guard let app = args.string("app"), !app.isEmpty else {
             return invalidArgs("windows requires an 'app' argument (a bundle identifier).")
         }
-        // Accessibility preflight, mirroring the CLI command's fail-fast order.
-        guard permissions.accessibilityGranted else {
-            return .text(PermissionError(permission: .accessibility).diagnostic, isError: true)
+        switch WindowsPipeline.run(bundleId: app, json: args.bool("json") ?? false, permissions: permissions) {
+        case let .listed(output):
+            return .text(output)
+        case let .failed(stderr, _):
+            return .text(stderr, isError: true)
         }
-        let pid: pid_t
-        do {
-            pid = try AXWindowEnumerator.resolveRunningPID(bundleId: app)
-        } catch let error as AppNotRunningError {
-            return .text(error.message, isError: true)
-        } catch {
-            return .text("mtouch: could not resolve application '\(app)': \(error)", isError: true)
-        }
-        let windows = AXWindowEnumerator.windows(ofPID: pid)
-        if args.bool("json") ?? false {
-            return .text(WindowInfo.jsonArray(windows))
-        }
-        if windows.isEmpty {
-            return .text("no windows for \(app)")
-        }
-        return .text(windows.map(\.textLine).joined(separator: "\n"))
     }
 
     // MARK: - doctor

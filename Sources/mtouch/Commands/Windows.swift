@@ -37,31 +37,13 @@ struct Windows: ParsableCommand {
                 }
             }
         ) { () -> Outcome in
-            do {
-                try Preflight.requireAccessibility()
-            } catch let error as PermissionError {
-                return .failed(stderr: error.diagnostic, code: .permissionMissing)
-            } catch {
-                return .failed(stderr: "mtouch: preflight failed: \(error)", code: .runtimeFailure)
-            }
-
-            let pid: pid_t
-            do {
-                pid = try AXWindowEnumerator.resolveRunningPID(bundleId: app)
-            } catch let error as AppNotRunningError {
-                return .failed(stderr: error.message, code: .runtimeFailure)
-            } catch {
-                return .failed(stderr: "mtouch: could not resolve application '\(app)': \(error)", code: .runtimeFailure)
-            }
-
-            let windows = AXWindowEnumerator.windows(ofPID: pid)
-            if jsonOutput {
-                return .listed(WindowInfo.jsonArray(windows))
-            } else if windows.isEmpty {
-                // Zero windows is a success state; say so explicitly.
-                return .listed("no windows for \(app)")
-            } else {
-                return .listed(windows.map(\.textLine).joined(separator: "\n"))
+            // Preflight/resolve/enumerate/render live in the shared pipeline so the
+            // CLI and MCP surfaces stay byte-for-byte in parity by construction.
+            switch WindowsPipeline.run(bundleId: app, json: jsonOutput) {
+            case let .listed(output):
+                return .listed(output)
+            case let .failed(stderr, code):
+                return .failed(stderr: stderr, code: code)
             }
         }
 

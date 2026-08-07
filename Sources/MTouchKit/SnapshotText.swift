@@ -112,15 +112,17 @@ extension Snapshot {
     /// non-actionable siblings are filtered out.
     func renderedNodes() -> [RenderedNode] {
         var out: [RenderedNode] = []
-        func walk(_ node: AXNode, depth: Int, path: [Int]) {
-            if isNoise(node) { return }
+        func walk(_ node: AXNode, depth: Int, path: [Int], mask: SnapshotNoise.NoiseMask) {
+            if mask.isNoise { return }
             out.append(RenderedNode(node: node, ref: ref(atPath: path), depth: depth, path: path))
             for (index, child) in node.children.enumerated() {
-                walk(child, depth: depth + 1, path: path + [index])
+                walk(child, depth: depth + 1, path: path + [index], mask: mask.children[index])
             }
         }
+        // One O(n) noise pass per root; the walk then reads precomputed verdicts.
+        let masks = roots.map { SnapshotNoise.mask(for: $0).mask }
         for (index, root) in roots.enumerated() {
-            walk(root, depth: 0, path: [index])
+            walk(root, depth: 0, path: [index], mask: masks[index])
         }
         return out
     }

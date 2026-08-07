@@ -12,20 +12,25 @@ import CoreGraphics
 /// masked here TOO — the real secret never appears.
 public enum SnapshotJSON {
     public static func render(_ snapshot: Snapshot) -> String {
+        // One O(n) noise pass per root; recursion then reads precomputed verdicts.
+        let masks = snapshot.roots.map { SnapshotNoise.mask(for: $0).mask }
         let objects = snapshot.roots.enumerated().compactMap { index, root in
-            object(for: root, path: [index], snapshot: snapshot)
+            object(for: root, path: [index], snapshot: snapshot, mask: masks[index])
         }
         return "[" + objects.joined(separator: ",") + "]"
     }
 
     /// Nil when the node is filtered out as noise; otherwise its JSON object,
-    /// with noise-filtered children nested under `children`.
-    private static func object(for node: AXNode, path: [Int], snapshot: Snapshot) -> String? {
-        if isNoise(node) { return nil }
+    /// with noise-filtered children nested under `children`. Walks the AXNode tree
+    /// and its `NoiseMask` in lockstep by child index.
+    private static func object(
+        for node: AXNode, path: [Int], snapshot: Snapshot, mask: SnapshotNoise.NoiseMask
+    ) -> String? {
+        if mask.isNoise { return nil }
 
         var fields = nodeFields(for: node, ref: snapshot.ref(atPath: path))
         let children = node.children.enumerated().compactMap { index, child in
-            object(for: child, path: path + [index], snapshot: snapshot)
+            object(for: child, path: path + [index], snapshot: snapshot, mask: mask.children[index])
         }
         fields.append("\"children\":[\(children.joined(separator: ","))]")
 
