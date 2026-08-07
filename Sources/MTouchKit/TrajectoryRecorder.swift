@@ -59,7 +59,8 @@ public enum TrajectoryRecorder {
         environment: [String: String],
         operation: () -> Outcome,
         describe: (Outcome) -> TrajectoryOutcomeInfo,
-        now: () -> Double = { ProcessInfo.processInfo.systemUptime }
+        now: () -> Double = { ProcessInfo.processInfo.systemUptime },
+        wallNow: () -> Double = { Date().timeIntervalSince1970 }
     ) throws -> Outcome {
         guard let path = environment[MTouchEnvironment.trajectoryKey], !path.isEmpty else {
             // Recording off: pure pass-through, zero file work, zero throws.
@@ -75,6 +76,7 @@ public enum TrajectoryRecorder {
         let sessionPath = SessionStore.sessionFilePath(environment: environment)
         let preDigest = (kind == .action) ? sessionDigest(sessionPath) : nil
         let timestamp = now()
+        let wallClock = wallNow()
 
         let outcome = operation()
         let info = describe(outcome)
@@ -90,6 +92,7 @@ public enum TrajectoryRecorder {
         let record = TrajectoryRecord(
             command: command,
             timestamp: timestamp,
+            wallClock: wallClock,
             args: safeArgs,
             ok: info.ok,
             exit: info.exit,
@@ -140,19 +143,46 @@ public enum TrajectoryRecorder {
         return fd
     }
 
-    /// Append the record as ONE `write(2)` of the complete `<json>\n` buffer. On a
-    /// file opened O_APPEND this is atomic on macOS, so a crash mid-session leaves
-    /// every completed line intact (at most a final truncated line) and concurrent
-    /// writers to the same file never interleave partial lines.
+    /// Append the record's complete `<json>\n` buffer to the O_APPEND fd both
+    /// ATOMICALLY and COMPLETELY, so the file is always fully `jq -c .`-parseable:
+    ///
+    ///   - An advisory exclusive lock (`flock(LOCK_EX)`) is held for the whole
+    ///     append and released in a `defer`. This serializes concurrent recorders,
+    ///     so a large record that needs more than one `write(2)` (a big `diff` can
+    ///     exceed the kernel's atomic-append size) cannot interleave with another
+    ///     writer and tear a line.
+    ///   - The `write(2)` is looped until the entire buffer is out, retrying on
+    ///     `EINTR` and advancing past a partial write, so a short/interrupted write
+    ///     completes rather than throwing or leaving a torn line.
+    ///
+    /// A crash mid-session still leaves every completed line intact (at most a final
+    /// truncated line). A genuinely unusable fd surfaces as `notWritable` (exit 1).
     private static func appendLine(_ line: String, to fd: Int32, path: String) throws {
-        let data = Data(line.utf8)
-        let written = data.withUnsafeBytes { buffer -> Int in
-            guard let base = buffer.baseAddress, buffer.count > 0 else { return 0 }
-            return write(fd, base, buffer.count)
+        // Serialize with any concurrent recorder before touching the file, so a
+        // multi-write large line stays contiguous. Retry the lock itself on EINTR.
+        while flock(fd, LOCK_EX) != 0 {
+            if errno == EINTR { continue }
+            throw TrajectoryError.notWritable(path: path, reason: String(cString: strerror(errno)))
         }
-        guard written == data.count else {
-            let reason = written < 0 ? String(cString: strerror(errno)) : "short write (\(written)/\(data.count) bytes)"
-            throw TrajectoryError.notWritable(path: path, reason: reason)
+        defer { _ = flock(fd, LOCK_UN) }
+
+        let data = Data(line.utf8)
+        try data.withUnsafeBytes { buffer in
+            guard let base = buffer.baseAddress, buffer.count > 0 else { return }
+            let total = buffer.count
+            var offset = 0
+            while offset < total {
+                let written = write(fd, base + offset, total - offset)
+                if written < 0 {
+                    if errno == EINTR { continue }   // interrupted before any byte: retry
+                    throw TrajectoryError.notWritable(path: path, reason: String(cString: strerror(errno)))
+                }
+                if written == 0 {
+                    // No error yet no progress: refuse to spin forever.
+                    throw TrajectoryError.notWritable(path: path, reason: "write made no progress (\(offset)/\(total) bytes)")
+                }
+                offset += written                    // advance past a partial write
+            }
         }
     }
 

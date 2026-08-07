@@ -415,6 +415,52 @@ private func info(ok: Bool, exit: Int32?, errorClass: String?, diff: String? = n
         }
     }
 
+    @Test func aLargeRecordWritesAsOneParseableLine() throws {
+        try withTempDir { dir in
+            let trajectory = dir.appendingPathComponent("t.jsonl").path
+            let session = dir.appendingPathComponent("s.json").path
+            try writeSession(["A"], app: "app", pid: 1, to: session)
+            let env = ["MTOUCH_TRAJECTORY": trajectory, "MTOUCH_SESSION": session]
+            // A diff of tens of KB — larger than the kernel's atomic-append size, so
+            // the recorder must loop the write and keep the line whole.
+            let bigDiff = String(repeating: "+ e2 AXButton \"row of the very long diff\"\n", count: 2_000)
+            #expect(bigDiff.utf8.count > 40_000)
+
+            _ = try TrajectoryRecorder.record(command: "act",
+                args: TrajectoryArgs.build(["verb": .string("press"), "ref": .string("e1")]), kind: .action,
+                environment: env, operation: {},
+                describe: { _ in info(ok: true, exit: 0, errorClass: nil, diff: bigDiff) })
+
+            let records = try readRecords(trajectory)   // throws if the single line is torn
+            #expect(records.count == 1)
+            #expect(records[0]["diff"] as? String == bigDiff)   // exact, whole payload
+        }
+    }
+
+    @Test func concurrentLargeLineWritersNeverTearTheFile() throws {
+        try withTempDir { dir in
+            let trajectory = dir.appendingPathComponent("t.jsonl").path
+            let env = ["MTOUCH_TRAJECTORY": trajectory]
+            let count = 16
+            // ~96 KB per line: far past a single atomic append, so without the
+            // advisory lock concurrent multi-write appends would interleave.
+            let pad = String(repeating: "x", count: 96 * 1024)
+
+            DispatchQueue.concurrentPerform(iterations: count) { index in
+                _ = try? TrajectoryRecorder.record(
+                    command: "parallel",
+                    args: TrajectoryArgs.build(["worker": .int(index), "pad": .string(pad)]),
+                    kind: .read, environment: env, operation: {},
+                    describe: { _ in info(ok: true, exit: 0, errorClass: nil) })
+            }
+
+            let records = try readRecords(trajectory)   // throws if any line is torn
+            #expect(records.count == count)
+            let workers = Set(records.compactMap { $0["args"] as? [String: Any] }.compactMap { $0["worker"] as? Int })
+            #expect(workers == Set(0..<count))          // every writer's line survived, distinct
+        }
+    }
+
     @Test func timestampsAreNonDecreasingWithinASession() throws {
         try withTempDir { dir in
             let trajectory = dir.appendingPathComponent("t.jsonl").path
@@ -426,6 +472,50 @@ private func info(ok: Bool, exit: Int32?, errorClass: String?, diff: String? = n
             let stamps = try readRecords(trajectory).compactMap { $0["timestamp"] as? Double }
             #expect(stamps.count == 5)
             #expect(zip(stamps, stamps.dropFirst()).allSatisfy { $0 <= $1 })
+        }
+    }
+}
+
+// MARK: - Wall-clock timestamp
+
+@Suite struct TrajectoryWallClockTests {
+    @Test func recordCarriesAbsoluteWallClockAlongsideMonotonicTimestamp() throws {
+        try withTempDir { dir in
+            let trajectory = dir.appendingPathComponent("t.jsonl").path
+            let env = ["MTOUCH_TRAJECTORY": trajectory]
+
+            let before = Date().timeIntervalSince1970
+            _ = try TrajectoryRecorder.record(command: "doctor", args: TrajectoryArgs(),
+                kind: .read, environment: env, operation: {}, describe: { _ in info(ok: true, exit: 0, errorClass: nil) })
+            let after = Date().timeIntervalSince1970
+
+            let record = try #require(try readRecords(trajectory).first)
+            // The new absolute field is present and a plausible epoch (jq would read
+            // `.wallClock` the same way).
+            let wall = try #require(record["wallClock"] as? Double)
+            #expect(wall >= before - 1)
+            #expect(wall <= after + 1)
+            // The monotonic timestamp still exists as its own, distinct field.
+            let monotonic = try #require(record["timestamp"] as? Double)
+            #expect(monotonic != wall)
+        }
+    }
+
+    @Test func wallClockAndMonotonicTimestampAreInjectedIndependently() throws {
+        try withTempDir { dir in
+            let trajectory = dir.appendingPathComponent("t.jsonl").path
+            let env = ["MTOUCH_TRAJECTORY": trajectory]
+
+            // Pin both clocks so the record's two time fields carry the exact,
+            // distinct values supplied — proving they are separate channels.
+            _ = try TrajectoryRecorder.record(command: "apps", args: TrajectoryArgs(),
+                kind: .read, environment: env, operation: {},
+                describe: { _ in info(ok: true, exit: 0, errorClass: nil) },
+                now: { 42.5 }, wallNow: { 1_700_000_000.25 })
+
+            let record = try #require(try readRecords(trajectory).first)
+            #expect(record["timestamp"] as? Double == 42.5)
+            #expect(record["wallClock"] as? Double == 1_700_000_000.25)
         }
     }
 }

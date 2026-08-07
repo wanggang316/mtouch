@@ -102,12 +102,19 @@ public struct TrajectoryOutcomeInfo: Sendable, Equatable {
 /// One JSONL trajectory record. Rendered by hand (project pattern: byte-stable key
 /// order via `JSONText`, mirroring `DiffJSON`/`SnapshotJSON`) so the line is a
 /// single compact object the crash/concurrency guarantees can rely on. Every
-/// record carries `command`, `timestamp`, `args`, and an `outcome` object; the
-/// digest/diff/screenshot fields are present only for the classes that define
-/// them, so a reader distinguishes classes by field presence.
+/// record carries `command`, a monotonic `timestamp` (for ordering and the digest
+/// chain), an absolute `wallClock` (epoch seconds, recoverable as wall time), `args`,
+/// and an `outcome` object; the digest/diff/screenshot fields are present only for
+/// the classes that define them, so a reader distinguishes classes by field presence.
 struct TrajectoryRecord {
     let command: String
+    /// Monotonic clock (systemUptime), used for ordering and the digest chain.
+    /// Correct for ordering but NOT an absolute time and resets across reboot.
     let timestamp: Double
+    /// Absolute wall-clock time as epoch seconds (`Date().timeIntervalSince1970`),
+    /// so a record is recoverable to a real point in time; distinct from the
+    /// monotonic `timestamp` and never used for ordering.
+    let wallClock: Double
     let args: TrajectoryArgs
     let ok: Bool
     let exit: Int32?
@@ -125,6 +132,7 @@ struct TrajectoryRecord {
         var fields: [String] = [
             "\"command\":\(JSONText.string(command))",
             "\"timestamp\":\(JSONText.number(timestamp))",
+            "\"wallClock\":\(JSONText.number(wallClock))",
             "\"args\":\(args.jsonObject())",
             "\"outcome\":\(outcomeObject())",
         ]
