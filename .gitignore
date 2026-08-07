@@ -5,7 +5,7 @@ tests/runs/
 tests/**/*.png
 .DS_Store
 dist/
-mtouch-*-macos-universal.tar.gz
-mtouch-*-macos-universal.tar.gz.sha256
+mtouch-*-macos-*.tar.gz
+mtouch-*-macos-*.tar.gz.sha256
 __pycache__/
 *.pyc

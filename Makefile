@@ -1,6 +1,6 @@
 VERSION ?= dev
-NAME    := mtouch-$(VERSION)-macos-universal
-BINDIR   = $(shell swift build -c release --arch arm64 --arch x86_64 --show-bin-path)
+NAME    := mtouch-$(VERSION)-macos-arm64
+BINDIR   = $(shell swift build -c release --arch arm64 --show-bin-path)
 
 .PHONY: build test release package ungranted clean
 
@@ -10,9 +10,9 @@ build:
 test:
 	swift test
 
-## release: build a universal (arm64 + x86_64) release binary
+## release: build an arm64 release binary (Apple Silicon)
 release:
-	swift build -c release --arch arm64 --arch x86_64
+	swift build -c release --arch arm64
 	@lipo -info "$(BINDIR)/mtouch"
 
 ## package: produce dist/$(NAME).tar.gz + .sha256 (make package VERSION=v0.1.0)

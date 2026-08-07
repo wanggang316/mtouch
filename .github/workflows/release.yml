@@ -14,7 +14,7 @@ permissions:
 
 jobs:
   package:
-    name: Build & package universal binary
+    name: Build & package (arm64)
     runs-on: macos-15
     steps:
       - uses: actions/checkout@v4
@@ -31,15 +31,19 @@ jobs:
             echo "tag=${GITHUB_REF_NAME}" >> "$GITHUB_OUTPUT"
           fi
 
-      - name: Build universal release binary (arm64 + x86_64)
-        run: swift build -c release --arch arm64 --arch x86_64
+      # arm64-only: the macos-15 runner is Apple Silicon, and a --arch arm64
+      # --arch x86_64 universal build trips a Swift-language-version conflict in
+      # the MCP SDK's transitive deps (swift-collections / swift-service-lifecycle)
+      # under the runner toolchain. arm64 covers current Apple Silicon Macs.
+      - name: Build release binary (arm64)
+        run: swift build -c release --arch arm64
 
       - name: Package tarball
         run: |
           set -euo pipefail
           VER="${{ steps.ver.outputs.tag }}"
-          BINDIR="$(swift build -c release --arch arm64 --arch x86_64 --show-bin-path)"
-          NAME="mtouch-${VER}-macos-universal"
+          BINDIR="$(swift build -c release --arch arm64 --show-bin-path)"
+          NAME="mtouch-${VER}-macos-arm64"
           mkdir -p "dist/${NAME}"
           cp "${BINDIR}/mtouch" "dist/${NAME}/mtouch"
           cp README.md LICENSE "dist/${NAME}/"
@@ -54,10 +58,10 @@ jobs:
           set -euo pipefail
           VER="${{ steps.ver.outputs.tag }}"
           gh release create "$VER" \
-            mtouch-*-macos-universal.tar.gz \
-            mtouch-*-macos-universal.tar.gz.sha256 \
+            mtouch-*-macos-arm64.tar.gz \
+            mtouch-*-macos-arm64.tar.gz.sha256 \
             --title "mtouch $VER" \
             --generate-notes \
             || gh release upload "$VER" \
-                 mtouch-*-macos-universal.tar.gz \
-                 mtouch-*-macos-universal.tar.gz.sha256 --clobber
+                 mtouch-*-macos-arm64.tar.gz \
+                 mtouch-*-macos-arm64.tar.gz.sha256 --clobber

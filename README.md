@@ -26,16 +26,16 @@ The agent-facing contract is **AX-tree-as-text + snapshot-scoped refs + post-act
 
 ## Install
 
-Download the universal binary from the [latest release](https://github.com/wanggang316/mtouch/releases/latest):
+Download the prebuilt (Apple Silicon) binary from the [latest release](https://github.com/wanggang316/mtouch/releases/latest):
 
 ```sh
 VER=v0.1.0
-curl -fsSL -O "https://github.com/wanggang316/mtouch/releases/download/${VER}/mtouch-${VER}-macos-universal.tar.gz"
-tar xzf "mtouch-${VER}-macos-universal.tar.gz"
-./mtouch-${VER}-macos-universal/mtouch --help
+curl -fsSL -O "https://github.com/wanggang316/mtouch/releases/download/${VER}/mtouch-${VER}-macos-arm64.tar.gz"
+tar xzf "mtouch-${VER}-macos-arm64.tar.gz"
+./mtouch-${VER}-macos-arm64/mtouch --help
 ```
 
-Or build from source (below). Grant the invoking terminal **Accessibility** in System Settings → Privacy & Security before driving apps (`mtouch doctor` reports status).
+Prebuilt binaries target Apple Silicon (arm64); on Intel, build from source (below). Grant the invoking terminal **Accessibility** in System Settings → Privacy & Security before driving apps (`mtouch doctor` reports status).
 
 ## Build & test
 
@@ -44,12 +44,12 @@ swift build
 swift test              # hermetic unit tests (no AX/TCC/network)
 swift run mtouch --help
 
-make release            # universal (arm64 + x86_64) release binary
-make package VERSION=v0.1.0   # -> mtouch-v0.1.0-macos-universal.tar.gz (+ .sha256)
+make release            # arm64 (Apple Silicon) release binary
+make package VERSION=v0.1.0   # -> mtouch-v0.1.0-macos-arm64.tar.gz (+ .sha256)
 make ungranted          # run the ungranted-persona live probes
 ```
 
-Continuous integration (GitHub Actions, `macos-15`) runs the unit suite and — because a fresh CI runner is an *ungranted* host — live-verifies the ungranted-persona fail-fast behavior (`ci/ungranted-probes.sh`) that a granted developer machine cannot reproduce. Tagging `v*` builds and publishes a universal binary as a GitHub Release.
+Continuous integration (GitHub Actions, `macos-15`) runs the unit suite and — because a fresh CI runner is an *ungranted* host — live-verifies the ungranted-persona fail-fast behavior (`ci/ungranted-probes.sh`) that a granted developer machine cannot reproduce. Tagging `v*` builds and publishes an arm64 binary as a GitHub Release.
 
 ## Quick start
 
@@ -89,8 +89,8 @@ The load-bearing value type is `AXNode` (role/title/value/frame/enabled/actionab
 
 ## Status
 
-v1 complete: perception, action, wait, screenshot, MCP server, and trajectory recording, built across three validated milestones (370 unit tests; security-audited). A small set of ungranted-persona / minimized-window behaviors are verified at the unit level and deferred for live re-verification on an ungranted CI host (see `docs/`). Known non-blocking hardening items (e.g. a diff cross-path fallback, MCP `wait` off-main) are tracked for follow-up.
+v1 complete: perception, action, wait, screenshot, MCP server, and trajectory recording, built across three validated milestones (378 unit tests; security-audited). The ungranted-persona fail-fast behaviors that a granted developer machine can't reproduce are live-verified in CI (a fresh runner is an ungranted host); the minimized-window and split-grant cases remain unit-covered. Known non-blocking hardening items are tracked for follow-up.
 
 ## License
 
-TBD.
+[MIT](LICENSE) © 2026 Gump.
