@@ -11,6 +11,14 @@ import Foundation
 public enum ActOutcome: Equatable, Sendable {
     /// The rendered diff (text or JSON) to write to stdout; exit 0.
     case acted(String)
+    /// Input was delivered under `--no-verify`: no walk was taken before or after
+    /// it, so there is NO diff. The payload is the rendered "nothing was verified"
+    /// notice, written to stdout where a diff would go; exit 0.
+    ///
+    /// A case of its own rather than an `.acted` variant, so no consumer — stdout,
+    /// the MCP payload, the trajectory record — can silently treat an unverified
+    /// delivery as a verified action.
+    case deliveredUnverified(String)
     /// A stderr diagnostic paired with its non-zero exit code.
     case failed(stderr: String, code: MTouchExitCode)
 }
@@ -154,7 +162,7 @@ public enum ActPipeline {
         // Pre-action walk, retaining handles for re-location. A bounded timeout on
         // a wedged target surfaces as an explicit exit-1 diagnostic, never a hang.
         guard let liveTree = walkLive(pid) else {
-            return .failed(stderr: timeoutDiagnostic(app: app, pid: pid), code: .runtimeFailure)
+            return .failed(stderr: inputTimeoutDiagnostic(app: app, pid: pid), code: .runtimeFailure)
         }
 
         // Re-locate the SAME element by its hints. A miss means the element is gone
@@ -319,11 +327,19 @@ public enum ActPipeline {
     ///
     /// An empty `type` is an explicit no-op: it delivers nothing and reports
     /// "(no changes)" (exit 0), short-circuiting before any permission/target work
-    /// because it can neither fail nor change anything.
+    /// because it can neither fail nor change anything. `noVerify` does not change
+    /// that: nothing is delivered, so there is no unverified delivery to report.
+    ///
+    /// `noVerify` skips BOTH walks and the session write, delivering the keystrokes
+    /// and reporting that nothing was verified (see `UnverifiedDelivery`). Every
+    /// guard that does NOT depend on the tree still applies in the same order —
+    /// permission (2), target resolution (3), liveness (1), and the secure-input
+    /// refusal (5), which is owned by the delivery seam itself.
     public static func runKeyboard(
         action: KeyboardAction,
         appOverride: String?,
         json: Bool,
+        noVerify: Bool = false,
         environment: [String: String],
         permissions: PermissionProvider = LivePermissionProvider(),
         loadSession: (String) -> Session? = { SessionStore.load(from: $0) },
@@ -365,21 +381,10 @@ public enum ActPipeline {
             return .failed(stderr: notRunningDiagnostic(app: app, pid: pid), code: .runtimeFailure)
         }
 
-        // Pre-action walk for the diff baseline. A wedged target -> bounded exit 1.
-        guard let preWalk = rewalk(pid) else {
-            return .failed(stderr: timeoutDiagnostic(app: app, pid: pid), code: .runtimeFailure)
-        }
-        // Carry the session's refs onto the pre tree so a changed focused element
-        // keeps its ref in the diff (matching the ref verbs' pre snapshot).
-        let preSnapshot = Snapshot(roots: ScrollEnrichment.enrich(preWalk.nodes), refs: refs)
-
-        return runInputVerb(
-            pid: pid, app: app, sessionPath: sessionPath,
-            preSnapshot: preSnapshot, expectsMenu: false, json: json,
-            rewalk: rewalk, persist: persist, sleep: sleep
-        ) {
-            // Deliver the keystrokes. Secure input active -> exit 5, ZERO events,
-            // and a payload-free diagnostic (both from `SecureInputActive`).
+        // Deliver the keystrokes. Secure input active -> exit 5, ZERO events, and a
+        // payload-free diagnostic (both from `SecureInputActive`). The seam also
+        // owns the activate-before-post invariant, so both paths below activate.
+        func deliverKeystrokes() -> ActOutcome? {
             do {
                 try deliver(pid, action)
             } catch let error as SecureInputActive {
@@ -389,6 +394,29 @@ public enum ActPipeline {
             }
             return nil
         }
+
+        // Unverified delivery: no baseline, no settle, no session write — the
+        // session keeps describing the last tree that was actually READ, so a later
+        // ref still means what it meant. Only the notice is reported.
+        if noVerify {
+            if let failure = deliverKeystrokes() { return failure }
+            return .deliveredUnverified(UnverifiedDelivery.rendered(json: json))
+        }
+
+        // Pre-action walk for the diff baseline. A wedged target -> bounded exit 1.
+        guard let preWalk = rewalk(pid) else {
+            return .failed(stderr: inputTimeoutDiagnostic(app: app, pid: pid), code: .runtimeFailure)
+        }
+        // Carry the session's refs onto the pre tree so a changed focused element
+        // keeps its ref in the diff (matching the ref verbs' pre snapshot).
+        let preSnapshot = Snapshot(roots: ScrollEnrichment.enrich(preWalk.nodes), refs: refs)
+
+        return runInputVerb(
+            pid: pid, app: app, sessionPath: sessionPath,
+            preSnapshot: preSnapshot, expectsMenu: false, json: json,
+            rewalk: rewalk, persist: persist, sleep: sleep,
+            act: deliverKeystrokes
+        )
     }
 
     // MARK: - Coordinate verbs (click / rightclick / doubleclick / drag / scroll)
@@ -399,10 +427,17 @@ public enum ActPipeline {
     /// screen points delivered via `deliver` (activate + post) — and an off-screen
     /// guard: any target point outside every display is rejected (exit 1) BEFORE a
     /// single event is posted, so a bad coordinate never delivers input anywhere.
+    ///
+    /// `noVerify` skips BOTH walks and the session write, delivering the gesture and
+    /// reporting that nothing was verified (see `UnverifiedDelivery`). Every guard
+    /// that does NOT depend on the tree still applies in the same order —
+    /// permission (2), target resolution (3), the off-screen guard (1), and
+    /// liveness (1).
     public static func runCoordinate(
         action: PointerAction,
         appOverride: String?,
         json: Bool,
+        noVerify: Bool = false,
         environment: [String: String],
         permissions: PermissionProvider = LivePermissionProvider(),
         loadSession: (String) -> Session? = { SessionStore.load(from: $0) },
@@ -446,9 +481,28 @@ public enum ActPipeline {
             return .failed(stderr: notRunningDiagnostic(app: app, pid: pid), code: .runtimeFailure)
         }
 
+        // Deliver the gesture. Any delivery failure is a runtime error (exit 1). The
+        // seam owns the activate-before-post invariant, so both paths below activate.
+        func deliverGesture() -> ActOutcome? {
+            do {
+                try deliver(pid, action)
+            } catch {
+                return .failed(stderr: "mtouch: failed to deliver pointer event: \(error)", code: .runtimeFailure)
+            }
+            return nil
+        }
+
+        // Unverified delivery: no baseline, no settle, no session write — the
+        // session keeps describing the last tree that was actually READ, so a later
+        // ref still means what it meant. Only the notice is reported.
+        if noVerify {
+            if let failure = deliverGesture() { return failure }
+            return .deliveredUnverified(UnverifiedDelivery.rendered(json: json))
+        }
+
         // Pre-action walk for the diff baseline. A wedged target -> bounded exit 1.
         guard let preWalk = rewalk(pid) else {
-            return .failed(stderr: timeoutDiagnostic(app: app, pid: pid), code: .runtimeFailure)
+            return .failed(stderr: inputTimeoutDiagnostic(app: app, pid: pid), code: .runtimeFailure)
         }
         // Carry the session's refs onto the pre tree so a changed element keeps its
         // ref in the diff (matching the ref/keyboard verbs' pre snapshot).
@@ -459,16 +513,9 @@ public enum ActPipeline {
         return runInputVerb(
             pid: pid, app: app, sessionPath: sessionPath,
             preSnapshot: preSnapshot, expectsMenu: action.opensMenu, json: json,
-            rewalk: rewalk, persist: persist, sleep: sleep
-        ) {
-            // Deliver the gesture. Any delivery failure is a runtime error (exit 1).
-            do {
-                try deliver(pid, action)
-            } catch {
-                return .failed(stderr: "mtouch: failed to deliver pointer event: \(error)", code: .runtimeFailure)
-            }
-            return nil
-        }
+            rewalk: rewalk, persist: persist, sleep: sleep,
+            act: deliverGesture
+        )
     }
 
     // MARK: - Shared back half (act -> settle -> persist -> render)
@@ -604,6 +651,22 @@ public enum ActPipeline {
     static func timeoutDiagnostic(app: String, pid: pid_t) -> String {
         "mtouch: act timed out reading the accessibility tree of '\(app)' (pid \(pid)); "
             + "the application appears unresponsive. Bounded to avoid an indefinite hang."
+    }
+
+    /// The same bounded-timeout report, plus the way FORWARD — which is the whole
+    /// difference between an agent that self-corrects and one that gives up.
+    ///
+    /// The commonest cause is not a hung application but a modal panel: its nested
+    /// event loop blocks the owning process's accessibility server, so every read
+    /// of the tree times out while the panel itself is perfectly responsive to
+    /// input. CGEvent delivery needs no tree, so the input verbs can still drive it
+    /// under `--no-verify`. Every verb that DELIVERS input reports this form; a
+    /// read reports the plain one, since it has no input to fall back to.
+    static func inputTimeoutDiagnostic(app: String, pid: pid_t) -> String {
+        timeoutDiagnostic(app: app, pid: pid)
+            + " If the target is showing a modal panel, retry with --no-verify on an input verb ("
+            + UnverifiedDelivery.verbs.joined(separator: ", ")
+            + ") to deliver input without an accessibility diff."
     }
 
     static func saveDiagnostic(_ error: Error, path: String) -> String {

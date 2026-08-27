@@ -114,6 +114,16 @@ public enum MCPToolCatalog {
                          description: "Bundle identifier override for coordinate/keyboard verbs."),
                 pidProperty,
                 jsonProperty,
+                Property(
+                    name: "noVerify", type: "boolean",
+                    description: "Deliver the input WITHOUT reading the accessibility tree: no diff is taken "
+                        + "and none is reported. Use it when the target is showing a modal panel, whose "
+                        + "nested event loop blocks the accessibility server so every read times out. The "
+                        + "effect of the action is NOT verified — snapshot afterwards to see what happened. "
+                        + "Accepted only by the verbs that synthesize input directly ("
+                        + UnverifiedDelivery.verbs.joined(separator: ", ") + "); the ref verbs and menu "
+                        + "refuse it, because they read the tree to find their target."
+                ),
             ],
             required: ["verb"]
         ),

@@ -84,19 +84,26 @@ public struct TrajectoryOutcomeInfo: Sendable, Equatable {
     public let errorClass: String?
     public let diff: String?
     public let screenshotPath: String?
+    /// `false` when the action DELIVERED input without reading the accessibility
+    /// tree (`--no-verify`), so the record can say so in a field of its own. nil
+    /// means the ordinary contract held: the action was verified against a
+    /// post-action walk, or the record is not an action at all.
+    public let verified: Bool?
 
     public init(
         ok: Bool,
         exit: Int32?,
         errorClass: String?,
         diff: String? = nil,
-        screenshotPath: String? = nil
+        screenshotPath: String? = nil,
+        verified: Bool? = nil
     ) {
         self.ok = ok
         self.exit = exit
         self.errorClass = errorClass
         self.diff = diff
         self.screenshotPath = screenshotPath
+        self.verified = verified
     }
 }
 
@@ -125,6 +132,12 @@ struct TrajectoryRecord {
     let digest: String?
     let diff: String?
     let screenshotPath: String?
+    /// Present — and only ever `false` — when the action delivered input WITHOUT
+    /// reading the accessibility tree (`--no-verify`). Such a record also carries
+    /// no `diff`, because none was taken. Its ABSENCE is the ordinary case: the
+    /// action was verified against a post-action walk, and the `diff` is that
+    /// verification.
+    let verified: Bool?
     /// The run bundle's step ordinal for this record; present only when a run
     /// directory is active. It is what joins a record to its `steps/NNNN-…png`
     /// files, so the report never has to guess by position — which concurrent
@@ -147,6 +160,7 @@ struct TrajectoryRecord {
         digest: String?,
         diff: String?,
         screenshotPath: String?,
+        verified: Bool? = nil,
         step: Int? = nil,
         evidence: RunEvidence? = nil
     ) {
@@ -162,6 +176,7 @@ struct TrajectoryRecord {
         self.digest = digest
         self.diff = diff
         self.screenshotPath = screenshotPath
+        self.verified = verified
         self.step = step
         self.evidence = evidence
     }
@@ -180,6 +195,7 @@ struct TrajectoryRecord {
         if let digest { fields.append("\"digest\":\(JSONText.string(digest))") }
         if let preDigest { fields.append("\"preDigest\":\(JSONText.string(preDigest))") }
         if let postDigest { fields.append("\"postDigest\":\(JSONText.string(postDigest))") }
+        if let verified { fields.append("\"verified\":\(verified ? "true" : "false")") }
         if let diff { fields.append("\"diff\":\(JSONText.string(diff))") }
         if let screenshotPath { fields.append("\"screenshotPath\":\(JSONText.string(screenshotPath))") }
         if let step { fields.append("\"step\":\(step)") }
@@ -242,6 +258,10 @@ public extension ActOutcome {
         switch self {
         case let .acted(output):
             return TrajectoryOutcomeInfo(ok: true, exit: 0, errorClass: nil, diff: output)
+        case .deliveredUnverified:
+            // No `diff`: none was taken, and the stdout notice must never be
+            // recorded as if it were one. `verified: false` carries the fact.
+            return TrajectoryOutcomeInfo(ok: true, exit: 0, errorClass: nil, verified: false)
         case let .failed(_, code):
             return TrajectoryOutcomeInfo(ok: false, exit: code.rawValue, errorClass: code.trajectoryErrorClass)
         }
@@ -312,7 +332,13 @@ public extension ToolResult {
     /// payload — the SAME diff the CLI prints — and `screenshotPath` (for
     /// `.screenshot`) is recovered from the text line, never the image payload, so
     /// no bytes are embedded.
-    func trajectoryInfo(kind: TrajectoryKind) -> TrajectoryOutcomeInfo {
+    ///
+    /// `unverified` is the MCP analogue of the CLI's `--no-verify`: a tool result
+    /// is just text, so the caller — which knows what the client asked for — has to
+    /// say whether the action was verified. It suppresses the `diff`, because the
+    /// payload is the "nothing was verified" notice rather than a diff, and marks
+    /// the record with the same dedicated field the CLI writes.
+    func trajectoryInfo(kind: TrajectoryKind, unverified: Bool = false) -> TrajectoryOutcomeInfo {
         let ok = !isError
         let text: String? = payloads.compactMap {
             if case let .text(value) = $0 { return value }
@@ -320,8 +346,10 @@ public extension ToolResult {
         }.first
         var diff: String?
         var screenshotPath: String?
+        var verified: Bool?
         if ok {
-            if kind == .action { diff = text }
+            if kind == .action { diff = unverified ? nil : text }
+            if kind == .action, unverified { verified = false }
             if kind == .screenshot { screenshotPath = TrajectoryRecord.screenshotPath(fromMessage: text) }
         }
         return TrajectoryOutcomeInfo(
@@ -329,7 +357,8 @@ public extension ToolResult {
             exit: nil,
             errorClass: ok ? nil : "error",
             diff: diff,
-            screenshotPath: screenshotPath
+            screenshotPath: screenshotPath,
+            verified: verified
         )
     }
 }

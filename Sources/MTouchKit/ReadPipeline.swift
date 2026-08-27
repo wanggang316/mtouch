@@ -310,11 +310,12 @@ public enum ReadPipeline {
     }
 
     /// Carry an act-layer terminal outcome across unchanged. Resolution only ever
-    /// produces failures here (`.acted` is unreachable), but the mapping is total
-    /// so a future act-side change cannot silently become an empty read.
+    /// produces failures here (the success cases are unreachable — `read` delivers
+    /// no input), but the mapping is total so a future act-side change cannot
+    /// silently become an empty read.
     private static func fromAct(_ outcome: ActOutcome) -> ReadOutcome {
         switch outcome {
-        case let .acted(output): return .read(output)
+        case let .acted(output), let .deliveredUnverified(output): return .read(output)
         case let .failed(stderr, code): return .failed(stderr: stderr, code: code)
         }
     }

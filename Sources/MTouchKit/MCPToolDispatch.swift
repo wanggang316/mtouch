@@ -123,6 +123,10 @@ public enum MCPToolDispatch {
         permissions: PermissionProvider = LivePermissionProvider()
     ) -> ToolResult {
         let kind = trajectoryKind(forTool: tool, arguments: arguments)
+        // A tool result is just text, so the fact that a delivery was UNVERIFIED
+        // has to come from what the client asked for. Mirrors the CLI, where the
+        // flag is likewise known at the call site.
+        let unverified = tool == "act" && (arguments.bool("noVerify") ?? false)
         do {
             return try TrajectoryRecorder.record(
                 command: tool,
@@ -132,7 +136,7 @@ public enum MCPToolDispatch {
                 operation: {
                     dispatch(tool: tool, arguments: arguments, environment: environment, permissions: permissions)
                 },
-                describe: { $0.trajectoryInfo(kind: kind) }
+                describe: { $0.trajectoryInfo(kind: kind, unverified: unverified) }
             )
         } catch let error as TrajectoryError {
             return .text(error.diagnostic, isError: true)
@@ -263,9 +267,14 @@ public enum MCPToolDispatch {
             return invalidArgs(AppTarget.pidRequiresAppMessage)
         }
         guard let resolvePID = resolvePIDSeam(args) else { return invalidPID() }
+        // The CLI's `--no-verify`, mirrored argument-for-argument. Refused on the
+        // verbs that must read the tree to find their target, with the SAME pinned
+        // wording the CLI's exit-64 refusal prints.
+        let noVerify = args.bool("noVerify") ?? false
 
         switch verb {
         case "press", "focus", "show-menu", "set-value":
+            if noVerify { return invalidArgs(UnverifiedDelivery.refVerbRefusal) }
             guard let ref = args.string("ref") else {
                 return invalidArgs("act \(verb) requires a 'ref' argument (an element reference from a prior snapshot).")
             }
@@ -299,7 +308,7 @@ public enum MCPToolDispatch {
                 action = .scroll(at: at, dy: dy)
             }
             return fromAct(ActPipeline.runCoordinate(
-                action: action, appOverride: app, json: json,
+                action: action, appOverride: app, json: json, noVerify: noVerify,
                 environment: environment, permissions: permissions, resolvePID: resolvePID
             ))
 
@@ -308,7 +317,7 @@ public enum MCPToolDispatch {
                 return invalidArgs("act drag requires 'from' and 'to' coordinates as 'x,y'.")
             }
             return fromAct(ActPipeline.runCoordinate(
-                action: .drag(from: from, to: to), appOverride: app, json: json,
+                action: .drag(from: from, to: to), appOverride: app, json: json, noVerify: noVerify,
                 environment: environment, permissions: permissions, resolvePID: resolvePID
             ))
 
@@ -317,11 +326,12 @@ public enum MCPToolDispatch {
                 return invalidArgs("act type requires a 'text' argument.")
             }
             return fromAct(ActPipeline.runKeyboard(
-                action: .type(text), appOverride: app, json: json,
+                action: .type(text), appOverride: app, json: json, noVerify: noVerify,
                 environment: environment, permissions: permissions, resolvePID: resolvePID
             ))
 
         case "menu":
+            if noVerify { return invalidArgs(UnverifiedDelivery.menuRefusal) }
             guard let raw = args.string("path"), !raw.isEmpty else {
                 return invalidArgs("act menu requires a 'path' argument, e.g. 'File>Save'.")
             }
@@ -354,7 +364,7 @@ public enum MCPToolDispatch {
                 return .text("mtouch: invalid key combination '\(combo)'.", isError: true)
             }
             return fromAct(ActPipeline.runKeyboard(
-                action: .key(parsed), appOverride: app, json: json,
+                action: .key(parsed), appOverride: app, json: json, noVerify: noVerify,
                 environment: environment, permissions: permissions, resolvePID: resolvePID
             ))
 
@@ -364,9 +374,12 @@ public enum MCPToolDispatch {
         }
     }
 
+    /// The unverified case carries the SAME rendered notice the CLI prints, so the
+    /// two surfaces stay byte-identical; the record — not the payload — is what
+    /// marks it unverified (see `dispatchRecorded`).
     private static func fromAct(_ outcome: ActOutcome) -> ToolResult {
         switch outcome {
-        case let .acted(output): return .text(output)
+        case let .acted(output), let .deliveredUnverified(output): return .text(output)
         case let .failed(stderr, _): return .text(stderr, isError: true)
         }
     }

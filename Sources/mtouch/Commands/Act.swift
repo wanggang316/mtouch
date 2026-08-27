@@ -30,6 +30,20 @@ struct Act: ParsableCommand {
 
 // MARK: - Shared argument shapes
 
+/// `--no-verify`, offered by the act verbs that synthesize input through CGEvent
+/// and resolve no element reference. It trades away the post-action diff — the
+/// evidence that is mtouch's reason to exist — so its help says exactly that, and
+/// says when the trade is worth making.
+struct VerifyOptions: ParsableArguments {
+    @Flag(help: ArgumentHelp(
+        "Deliver the input WITHOUT reading the accessibility tree: no diff is taken and none is "
+            + "reported. Use it when the target is showing a modal panel, whose nested event loop "
+            + "blocks the accessibility server so every read times out. The effect of the action is "
+            + "NOT verified — run 'mtouch snapshot' afterwards to see what happened."
+    ))
+    var noVerify = false
+}
+
 /// Positional grammar shared by the ref-based verbs: `<ref> [<value>]`.
 /// Only set-value consumes `<value>`.
 struct RefActionArguments: ParsableArguments {
@@ -42,9 +56,37 @@ struct RefActionArguments: ParsableArguments {
     @Flag(help: "Emit the resulting diff as machine-readable JSON.")
     var json = false
 
+    /// Declared but REFUSED. A ref verb locates its target BY reading the tree, so
+    /// it cannot skip that read; accepting the flag here would be a promise the
+    /// verb cannot keep. It is declared (hidden, so help never advertises it) only
+    /// so the refusal can say WHY and name the verbs that do take it — an agent
+    /// that gets ArgumentParser's bare "unknown option" learns nothing.
+    @Flag(help: .hidden)
+    var noVerify = false
+
     @OptionGroup var appOptions: OptionalAppOptions
 
     @OptionGroup var runOptions: RunOptions
+
+    mutating func validate() throws {
+        if noVerify { throw ValidationError(UnverifiedDelivery.refVerbRefusal) }
+    }
+}
+
+/// Maps an act outcome onto stdout/stderr + exit code, shared by every verb
+/// runner so the three cases are decided in ONE place.
+///
+/// `.deliveredUnverified` prints its notice exactly where a diff would go and
+/// exits 0: the input WAS delivered, so the command succeeded — what it cannot
+/// claim is that anything was verified, and the payload says so.
+func report(_ outcome: ActOutcome) throws {
+    switch outcome {
+    case let .acted(output), let .deliveredUnverified(output):
+        print(output)
+    case let .failed(stderr, code):
+        FileHandle.standardError.write(Data((stderr + "\n").utf8))
+        throw ExitCode(code.rawValue)
+    }
 }
 
 /// Executes a ref-based verb through `ActPipeline` and maps its outcome to
@@ -75,13 +117,7 @@ func runRefVerb(_ verb: ActVerb, _ arguments: RefActionArguments) throws {
             environment: environment
         )
     }
-    switch outcome {
-    case let .acted(output):
-        print(output)
-    case let .failed(stderr, code):
-        FileHandle.standardError.write(Data((stderr + "\n").utf8))
-        throw ExitCode(code.rawValue)
-    }
+    try report(outcome)
 }
 
 // MARK: - Ref-based verbs
@@ -161,13 +197,7 @@ func runMenuVerb(
             resolvePID: AppTarget.resolver(pid: pidOverride)
         )
     }
-    switch outcome {
-    case let .acted(output):
-        print(output)
-    case let .failed(stderr, code):
-        FileHandle.standardError.write(Data((stderr + "\n").utf8))
-        throw ExitCode(code.rawValue)
-    }
+    try report(outcome)
 }
 
 extension Act {
@@ -207,11 +237,19 @@ extension Act {
         @Flag(help: "Emit the resulting diff as machine-readable JSON.")
         var json = false
 
+        /// Declared but REFUSED, for the same reason as the ref verbs: this verb
+        /// FINDS its command by walking the menu bar over the accessibility API.
+        @Flag(help: .hidden)
+        var noVerify = false
+
         @OptionGroup var appOptions: OptionalAppOptions
 
         @OptionGroup var runOptions: RunOptions
 
         mutating func validate() throws {
+            if noVerify {
+                throw ValidationError(UnverifiedDelivery.menuRefusal)
+            }
             if path == nil, item.isEmpty {
                 throw ValidationError("Provide a menu path such as 'File>Save', or one --item per menu level.")
             }
@@ -251,12 +289,15 @@ extension Act {
 /// (`act wiggle`) are all rejected by ArgumentParser as usage errors (exit 64)
 /// BEFORE this runs — a ref token is not a valid `x,y`, so it fails value parsing.
 func runCoordinateVerb(
-    _ action: PointerAction, appOverride: String?, pidOverride: pid_t?, json: Bool, run: RunOptions
+    _ action: PointerAction, appOverride: String?, pidOverride: pid_t?, json: Bool,
+    noVerify: Bool, run: RunOptions
 ) throws {
     let environment = ProcessInfo.processInfo.environment
     let outcome = try recorded(
         command: "act",
-        args: coordinateArgs(action, appOverride: appOverride, pidOverride: pidOverride, json: json),
+        args: coordinateArgs(
+            action, appOverride: appOverride, pidOverride: pidOverride, json: json, noVerify: noVerify
+        ),
         kind: .action,
         run: run,
         describe: { (outcome: ActOutcome) in outcome.trajectoryInfo }
@@ -267,28 +308,24 @@ func runCoordinateVerb(
             action: action,
             appOverride: appOverride,
             json: json,
+            noVerify: noVerify,
             environment: environment,
             resolvePID: AppTarget.resolver(pid: pidOverride)
         )
     }
-    switch outcome {
-    case let .acted(output):
-        print(output)
-    case let .failed(stderr, code):
-        FileHandle.standardError.write(Data((stderr + "\n").utf8))
-        throw ExitCode(code.rawValue)
-    }
+    try report(outcome)
 }
 
 /// The recorded args for a coordinate verb: the verb name plus its target points
 /// (and scroll delta), mirroring the MCP `act` tool's argument vocabulary.
 private func coordinateArgs(
-    _ action: PointerAction, appOverride: String?, pidOverride: pid_t?, json: Bool
+    _ action: PointerAction, appOverride: String?, pidOverride: pid_t?, json: Bool, noVerify: Bool
 ) -> TrajectoryArgs {
     var pairs: [String: TrajectoryArgs.Value?] = [
         "app": appOverride.map(TrajectoryArgs.Value.string),
         "pid": pidOverride.map { .int(Int($0)) },
         "json": json ? .bool(true) : nil,
+        "noVerify": noVerify ? .bool(true) : nil,
     ]
     switch action {
     case let .click(point):
@@ -324,10 +361,12 @@ extension Act {
 
         @OptionGroup var runOptions: RunOptions
 
+        @OptionGroup var verifyOptions: VerifyOptions
+
         mutating func run() throws {
             try runCoordinateVerb(
                 .click(at), appOverride: appOptions.app, pidOverride: appOptions.pid, json: json,
-                run: runOptions
+                noVerify: verifyOptions.noVerify, run: runOptions
             )
         }
     }
@@ -348,10 +387,12 @@ extension Act {
 
         @OptionGroup var runOptions: RunOptions
 
+        @OptionGroup var verifyOptions: VerifyOptions
+
         mutating func run() throws {
             try runCoordinateVerb(
                 .rightClick(at), appOverride: appOptions.app, pidOverride: appOptions.pid, json: json,
-                run: runOptions
+                noVerify: verifyOptions.noVerify, run: runOptions
             )
         }
     }
@@ -372,10 +413,12 @@ extension Act {
 
         @OptionGroup var runOptions: RunOptions
 
+        @OptionGroup var verifyOptions: VerifyOptions
+
         mutating func run() throws {
             try runCoordinateVerb(
                 .doubleClick(at), appOverride: appOptions.app, pidOverride: appOptions.pid, json: json,
-                run: runOptions
+                noVerify: verifyOptions.noVerify, run: runOptions
             )
         }
     }
@@ -399,10 +442,12 @@ extension Act {
 
         @OptionGroup var runOptions: RunOptions
 
+        @OptionGroup var verifyOptions: VerifyOptions
+
         mutating func run() throws {
             try runCoordinateVerb(
                 .drag(from: from, to: to), appOverride: appOptions.app, pidOverride: appOptions.pid,
-                json: json, run: runOptions
+                json: json, noVerify: verifyOptions.noVerify, run: runOptions
             )
         }
     }
@@ -430,10 +475,12 @@ extension Act {
 
         @OptionGroup var runOptions: RunOptions
 
+        @OptionGroup var verifyOptions: VerifyOptions
+
         mutating func run() throws {
             try runCoordinateVerb(
                 .scroll(at: at, dy: dy), appOverride: appOptions.app, pidOverride: appOptions.pid,
-                json: json, run: runOptions
+                json: json, noVerify: verifyOptions.noVerify, run: runOptions
             )
         }
     }
@@ -451,7 +498,7 @@ extension Act {
 /// recorder, so a secret never persists.
 func runKeyboardVerb(
     _ action: KeyboardAction, appOverride: String?, pidOverride: pid_t?, json: Bool,
-    args: TrajectoryArgs, run: RunOptions
+    noVerify: Bool, args: TrajectoryArgs, run: RunOptions
 ) throws {
     let environment = ProcessInfo.processInfo.environment
     let outcome = try recorded(
@@ -467,17 +514,12 @@ func runKeyboardVerb(
             action: action,
             appOverride: appOverride,
             json: json,
+            noVerify: noVerify,
             environment: environment,
             resolvePID: AppTarget.resolver(pid: pidOverride)
         )
     }
-    switch outcome {
-    case let .acted(output):
-        print(output)
-    case let .failed(stderr, code):
-        FileHandle.standardError.write(Data((stderr + "\n").utf8))
-        throw ExitCode(code.rawValue)
-    }
+    try report(outcome)
 }
 
 extension Act {
@@ -497,17 +539,20 @@ extension Act {
 
         @OptionGroup var runOptions: RunOptions
 
+        @OptionGroup var verifyOptions: VerifyOptions
+
         mutating func run() throws {
             let args = TrajectoryArgs.build([
                 "verb": .string("type"),
                 "text": .string(text),
                 "json": json ? .bool(true) : nil,
+                "noVerify": verifyOptions.noVerify ? .bool(true) : nil,
                 "app": appOptions.app.map(TrajectoryArgs.Value.string),
                 "pid": appOptions.pid.map { .int(Int($0)) },
             ])
             try runKeyboardVerb(
                 .type(text), appOverride: appOptions.app, pidOverride: appOptions.pid, json: json,
-                args: args, run: runOptions
+                noVerify: verifyOptions.noVerify, args: args, run: runOptions
             )
         }
     }
@@ -528,6 +573,8 @@ extension Act {
 
         @OptionGroup var runOptions: RunOptions
 
+        @OptionGroup var verifyOptions: VerifyOptions
+
         mutating func run() throws {
             // Parse the combo FIRST: an unknown modifier/key name is a usage error
             // (exit 64) that must precede any permission/AX work (pinned 64 -> 2 -> 3).
@@ -542,12 +589,13 @@ extension Act {
                 "verb": .string("key"),
                 "combo": .string(combo),
                 "json": json ? .bool(true) : nil,
+                "noVerify": verifyOptions.noVerify ? .bool(true) : nil,
                 "app": appOptions.app.map(TrajectoryArgs.Value.string),
                 "pid": appOptions.pid.map { .int(Int($0)) },
             ])
             try runKeyboardVerb(
                 .key(parsed), appOverride: appOptions.app, pidOverride: appOptions.pid, json: json,
-                args: args, run: runOptions
+                noVerify: verifyOptions.noVerify, args: args, run: runOptions
             )
         }
     }

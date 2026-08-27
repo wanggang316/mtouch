@@ -60,7 +60,7 @@ public extension ActPipeline {
 
         // Pre-action walk for the diff baseline. A wedged target -> bounded exit 1.
         guard let preWalk = rewalk(pid) else {
-            return .failed(stderr: timeoutDiagnostic(app: app, pid: pid), code: .runtimeFailure)
+            return .failed(stderr: inputTimeoutDiagnostic(app: app, pid: pid), code: .runtimeFailure)
         }
         // Carry the session's refs onto the pre tree so a surviving element keeps its
         // ref in the diff (matching the other verbs' pre snapshot).
