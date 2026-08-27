@@ -26,6 +26,24 @@ AAAAAAABAAAAAQAAAAQAAAABAAAAJHN0c3oAAAAAAAAAAAAAAAQAAAB0AAAAGwAAAB4AAAAbAAAAFHN0
 ACw=
 """
 
+/// Whether THIS host's media stack can actually read a movie container.
+///
+/// A headless CI runner has no decoder available, and every `AVURLAsset` read
+/// there hangs until the verifier's own deadline and comes back `.unreadable`.
+/// That does not merely break the positive case — it quietly HOLLOWS OUT the
+/// negative ones: "not a movie" and "truncated movie" both expect a refusal, and
+/// a blanket timeout refuses everything, so they would keep passing while
+/// asserting nothing. Gate all three on this probe so they either test the real
+/// integration or are visibly skipped, never silently vacuous. The verifier's
+/// classification logic stays covered unconditionally through its `probe:` seam.
+private let hostCanDecodeMovies: Bool = {
+    let url = FileManager.default.temporaryDirectory
+        .appendingPathComponent("mtouch-decode-probe-\(UUID().uuidString).mp4")
+    defer { try? FileManager.default.removeItem(at: url) }
+    guard (try? tinyMovieData().write(to: url)) != nil else { return false }
+    return RecordArtifact.verify(path: url.path).isVerified
+}()
+
 private func tinyMovieData() -> Data {
     Data(base64Encoded: tinyMovieBase64, options: .ignoreUnknownCharacters) ?? Data()
 }
@@ -67,7 +85,7 @@ private func stubProbe(
     /// Bytes that are not a movie — which is also what a SIGKILLed recorder
     /// leaves, an mdat with no finalized moov — are refused with the parser's
     /// own reason.
-    @Test func bytesThatAreNotAMovieAreRefusedWithAReason() throws {
+    @Test(.enabled(if: hostCanDecodeMovies)) func bytesThatAreNotAMovieAreRefusedWithAReason() throws {
         try withRecordTempDir { dir in
             let url = dir.appendingPathComponent("notamovie.mp4")
             try Data("this is plainly not a movie container".utf8).write(to: url)
@@ -85,7 +103,7 @@ private func stubProbe(
 
     /// A TRUNCATED movie — the first half of a valid file — must fail too. This
     /// is the case that makes a killed recorder detectable at all.
-    @Test func aTruncatedMovieIsRefused() throws {
+    @Test(.enabled(if: hostCanDecodeMovies)) func aTruncatedMovieIsRefused() throws {
         try withRecordTempDir { dir in
             let whole = tinyMovieData()
             let url = dir.appendingPathComponent("truncated.mp4")
@@ -94,7 +112,7 @@ private func stubProbe(
         }
     }
 
-    @Test func aRealMovieIsVerifiedWithItsBytesDurationAndTrackCount() throws {
+    @Test(.enabled(if: hostCanDecodeMovies)) func aRealMovieIsVerifiedWithItsBytesDurationAndTrackCount() throws {
         try withRecordTempDir { dir in
             let url = dir.appendingPathComponent("good.mp4")
             try writeTinyMovie(url)
