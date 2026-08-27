@@ -63,7 +63,10 @@ private let advertisedTools = [
         #expect(spec("doctor").required.isEmpty)
         #expect(spec("app").required == ["action", "app"])
         #expect(spec("clipboard").required == ["action"])
-        #expect(spec("read").required == ["ref"])
+        // `read` requires NO property: its addressing grammar (exactly one of ref /
+        // app+of / app) is richer than a required-set can express, so it is enforced
+        // at call time with a message naming the conflict.
+        #expect(spec("read").required.isEmpty)
     }
 
     /// The action-shaped tools constrain their verb to an enum, so a client cannot
@@ -81,7 +84,7 @@ private let advertisedTools = [
     /// `--pid` parity: every app-scoped tool advertises an OPTIONAL integer `pid`,
     /// so an MCP client can disambiguate two instances exactly as the CLI does.
     @Test func appScopedToolsAdvertiseAnOptionalIntegerPid() throws {
-        for name in ["snapshot", "act", "wait", "windows", "app"] {
+        for name in ["snapshot", "act", "wait", "windows", "app", "read"] {
             let spec = try #require(MCPToolCatalog.tools.first { $0.name == name })
             let pid = try #require(spec.properties.first { $0.name == "pid" },
                                    "\(name) should advertise a pid property")
@@ -93,11 +96,11 @@ private let advertisedTools = [
     }
 
     /// Adding a property must not add, rename, or remove a TOOL (VAL-MCP-002).
-    @Test func addingPidChangesNoToolName() {
+    @Test func addingPropertiesChangesNoToolName() {
         #expect(MCPToolCatalog.tools.count == advertisedTools.count)
         #expect(Set(MCPToolCatalog.toolNames) == Set(advertisedTools))
         // Tools with no app argument gain nothing.
-        for name in ["screenshot", "apps", "doctor", "clipboard", "read"] {
+        for name in ["screenshot", "apps", "doctor", "clipboard"] {
             let spec = MCPToolCatalog.tools.first { $0.name == name }
             #expect(spec?.properties.contains { $0.name == "pid" } == false)
         }
@@ -115,11 +118,19 @@ private let advertisedTools = [
         #expect(spec.required == ["app", "timeout"])
     }
 
-    @Test func readAdvertisesARefAndAJSONFlagOnly() throws {
+    /// `read` mirrors the CLI's three addressing modes, so an agent does not have to
+    /// re-learn the grammar when it switches surfaces.
+    @Test func readAdvertisesAllThreeAddressingModes() throws {
         let spec = try #require(MCPToolCatalog.tools.first { $0.name == "read" })
-        #expect(spec.properties.map(\.name) == ["ref", "json"])
-        let ref = try #require(spec.properties.first { $0.name == "ref" })
-        #expect(ref.type == "string")
+        #expect(spec.properties.map(\.name) == ["ref", "app", "pid", "of", "json"])
+        for name in ["ref", "app", "of"] {
+            let property = try #require(spec.properties.first { $0.name == name })
+            #expect(property.type == "string")
+            #expect(!property.description.isEmpty)
+        }
+        // The multi-match contract is documented where a client will read it.
+        let of = try #require(spec.properties.first { $0.name == "of" })
+        #expect(of.description.contains("EVERY match"))
     }
 
     @Test func actVerbEnumCoversTheGrammar() {
@@ -481,10 +492,53 @@ private let advertisedTools = [
 
     // MARK: read
 
-    @Test func readMissingRefIsInvalidArgs() {
+    @Test func readWithNoAddressingModeIsInvalidArgs() {
         let result = call("read", [:])
         #expect(result.isError)
-        #expect(text(result)?.contains("requires a 'ref'") == true)
+        #expect(text(result)?.contains("addressing mode") == true)
+    }
+
+    /// The three modes are mutually exclusive on BOTH surfaces, refused by the same
+    /// grammar with the same message.
+    @Test func readWithTwoAddressingModesNamesTheConflict() {
+        let result = call("read", ["ref": .string("e1"), "of": .string("textarea"),
+                                   "app": .string("com.example.App")], permissions: axOnly)
+        #expect(result.isError)
+        #expect(text(result)?.contains("pass only one") == true)
+    }
+
+    @Test func readCriteriaWithoutAnAppIsInvalidArgs() {
+        let result = call("read", ["of": .string("textarea")], permissions: axOnly)
+        #expect(result.isError)
+        #expect(text(result)?.contains("--of requires --app") == true)
+    }
+
+    /// An empty string selects nothing, so it must not be mistaken for a mode.
+    @Test func readWithAnEmptyRefIsNotAnAddressingMode() {
+        let result = call("read", ["ref": .string("")], permissions: axOnly)
+        #expect(result.isError)
+        #expect(text(result)?.contains("addressing mode") == true)
+    }
+
+    @Test func readPidWithoutAnAppIsRefused() {
+        let result = call("read", ["ref": .string("e1"), "pid": .int(4242)], permissions: axOnly)
+        #expect(result.isError)
+        #expect(text(result) == "mtouch: invalid arguments: " + AppTarget.pidRequiresAppMessage)
+    }
+
+    /// The criteria mode reaches the app-scoped pipeline (not the ref one), so the
+    /// permission gate — not a missing-ref complaint — is what answers.
+    @Test func readByCriteriaRoutesToTheAppPipeline() {
+        let result = call("read", ["app": .string("com.example.App"), "of": .string("group \"answer\"")],
+                          permissions: ungranted)
+        #expect(result.isError)
+        #expect(text(result) == PermissionError(permission: .accessibility).diagnostic)
+    }
+
+    @Test func readWholeAppRoutesToTheAppPipeline() {
+        let result = call("read", ["app": .string("com.example.App")], permissions: ungranted)
+        #expect(result.isError)
+        #expect(text(result) == PermissionError(permission: .accessibility).diagnostic)
     }
 
     @Test func readUnknownTokenCarriesTheCLIDiagnosticVerbatim() {
@@ -534,6 +588,23 @@ private let advertisedTools = [
             Issue.record("expected the recorded process to be gone"); return
         }
         let result = call("read", ["ref": .string("e1")], permissions: axOnly, environment: environment)
+        #expect(result.isError)
+        #expect(text(result) == stderr)
+    }
+
+    /// The same parity for the criteria mode: a bundle id that names no running
+    /// process lands both surfaces on the identical resolution diagnostic, with no
+    /// AX access involved.
+    @Test func criteriaModeAlsoProducesTheIdenticalPayload() throws {
+        let pipeline = ReadPipeline.runApp(
+            bundleId: "com.example.NotReal", criteria: WaitCriteria(parsing: "group \"answer\""),
+            json: false, permissions: axOnly
+        )
+        guard case let .failed(stderr, _) = pipeline else {
+            Issue.record("expected an unresolvable bundle id"); return
+        }
+        let result = call("read", ["app": .string("com.example.NotReal"), "of": .string("group \"answer\"")],
+                          permissions: axOnly)
         #expect(result.isError)
         #expect(text(result) == stderr)
     }

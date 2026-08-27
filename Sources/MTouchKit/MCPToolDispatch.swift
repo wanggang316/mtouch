@@ -440,13 +440,43 @@ public enum MCPToolDispatch {
     private static func read(
         _ args: ToolArguments, environment: [String: String], permissions: PermissionProvider
     ) -> ToolResult {
-        guard let ref = args.string("ref"), !ref.isEmpty else {
-            return invalidArgs("read requires a 'ref' argument (an element reference from a prior snapshot).")
+        // An empty string addresses nothing, so it is treated as absent and answered
+        // by the grammar below rather than sent to a pipeline as a blank target.
+        let ref = nonEmpty(args.string("ref"))
+        let of = nonEmpty(args.string("of"))
+        let app = nonEmpty(args.string("app"))
+        // Same rule as the CLI's `OptionalAppOptions`: a pid with no bundle id to
+        // check it against is refused rather than trusted blindly.
+        if args.isPresent("pid"), app == nil {
+            return invalidArgs(AppTarget.pidRequiresAppMessage)
         }
-        switch ReadPipeline.run(
-            ref: ref, json: args.bool("json") ?? false,
-            environment: environment, permissions: permissions
-        ) {
+        // The addressing modes are mutually exclusive, enforced by the SAME grammar
+        // the CLI validates with, so both surfaces refuse the same combinations with
+        // the same message.
+        if let message = ReadGrammar.selectionError(ref: ref, of: of, app: app) {
+            return invalidArgs(message)
+        }
+        guard let resolvePID = resolvePIDSeam(args) else { return invalidPID() }
+        let json = args.bool("json") ?? false
+
+        let outcome: ReadOutcome
+        switch ReadGrammar.makeMode(ref: ref, of: of, app: app) {
+        case let .ref(ref):
+            outcome = ReadPipeline.run(
+                ref: ref, json: json, environment: environment, permissions: permissions
+            )
+        case let .criteria(app, criteria):
+            outcome = ReadPipeline.runApp(
+                bundleId: app, criteria: criteria, json: json,
+                permissions: permissions, resolvePID: resolvePID
+            )
+        case let .wholeApp(app):
+            outcome = ReadPipeline.runApp(
+                bundleId: app, criteria: nil, json: json,
+                permissions: permissions, resolvePID: resolvePID
+            )
+        }
+        switch outcome {
         case let .read(output): return .text(output)
         case let .failed(stderr, _): return .text(stderr, isError: true)
         }
@@ -622,6 +652,13 @@ public enum MCPToolDispatch {
         guard args.isPresent("pid") else { return AppTarget.resolver(pid: nil) }
         guard let raw = args.int("pid"), let pid = pid_t(exactly: raw) else { return nil }
         return AppTarget.resolver(pid: pid)
+    }
+
+    /// An argument that is present but EMPTY carries no target, so it is treated as
+    /// absent — a blank string must not be mistaken for a selected addressing mode.
+    private static func nonEmpty(_ value: String?) -> String? {
+        guard let value, !value.isEmpty else { return nil }
+        return value
     }
 
     private static func invalidPID() -> ToolResult {

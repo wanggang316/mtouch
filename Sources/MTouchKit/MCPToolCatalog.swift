@@ -228,17 +228,34 @@ public enum MCPToolCatalog {
         ),
         Spec(
             name: "read",
-            description: "Print the full, untruncated text of a referenced element's subtree, in document "
-                + "order. Use it when the snapshot's node budget has dropped the text you need: snapshot "
-                + "renders one line per node and drops non-actionable nodes (long static text) first. "
+            description: "Print the full, untruncated text of a referenced element, of every element "
+                + "matching a criteria, or of a whole application, in document order. Use it when the "
+                + "snapshot's node budget has dropped the text you need: snapshot renders one line per "
+                + "node and drops non-actionable nodes (long static text) first. Address the text one of "
+                + "three mutually exclusive ways: 'ref'; 'app' + 'of'; or 'app' alone for every window. "
+                + "Prefer 'of' when the text has no reference — references are issued only to ACTIONABLE "
+                + "elements, and long prose usually sits under inert containers that have none. "
                 + "Reading changes nothing — no activation, no input, and the session's references are "
                 + "left as they were.",
             properties: [
                 Property(name: "ref", type: "string",
                          description: "Element reference from a prior snapshot, e.g. e5."),
+                Property(name: "app", type: "string",
+                         description: "Bundle identifier of the target application. Required by 'of', and "
+                             + "on its own reads every window of the application."),
+                pidProperty,
+                Property(name: "of", type: "string",
+                         description: "Read every element matching this criteria, e.g. 'group \"answer\"' "
+                             + "(the same criteria grammar the wait tool takes). EVERY match is returned, "
+                             + "in document order — several matches are separated by a blank line, or come "
+                             + "back as an array of {role, text} with json. Nothing matching is an error "
+                             + "naming the criteria, never an empty result."),
                 jsonProperty,
             ],
-            required: ["ref"]
+            // No property is required: the addressing grammar (exactly one of ref /
+            // app+of / app) is richer than a required-set can express, so it is
+            // enforced at call time with a message that names the conflict.
+            required: []
         ),
     ]
 
