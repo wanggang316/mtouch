@@ -13,8 +13,9 @@ import Foundation
 ///     rendering — no "generated at", no locale, no time zone. Two renders of one
 ///     bundle are byte-identical, so a report can be diffed and checked in.
 ///   - **Total.** A missing `run.json`, an absent or empty trajectory, a damaged
-///     line, a missing PNG, and an absent `video/` each render as a plain
-///     statement of what is absent, never as a broken page.
+///     line, a missing PNG, a frame that could not be cut out of the recording,
+///     and an absent `video/` each render as a plain statement of what is
+///     absent, never as a broken page.
 ///   - **Escaped.** Every value that came from the target application — AX
 ///     titles, values, diffs, typed text — goes through `escape`, because those
 ///     strings routinely contain `<`, `&`, quotes, CJK, and emoji.
@@ -32,7 +33,7 @@ public enum RunReportHTML {
         out += banner(redact: redact)
         out += videoSection(bundle, redact: redact)
         out += timeline(bundle, redact: redact)
-        out += legend(redact: redact)
+        out += legend(bundle, redact: redact)
         out += "</body>\n</html>\n"
         return out
     }
@@ -195,9 +196,13 @@ public enum RunReportHTML {
         var out = ""
         var rendered = 0
         for slot in RunStepSlot.allCases {
-            guard let relative = record.evidence[slot] else { continue }
-            rendered += 1
-            out += figure(relative: relative, slot: slot, root: root)
+            if let relative = record.evidence[slot] {
+                rendered += 1
+                out += figure(relative: relative, slot: slot, root: root, from: nil)
+            } else if let frame = record.evidence.frames[slot] {
+                rendered += 1
+                out += recordedFrame(record, slot: slot, frame: frame, root: root)
+            }
         }
         if let error = record.evidence.captureError {
             out += "<p class=\"capture-error\">capture failed — \(escape(error))"
@@ -209,25 +214,71 @@ public enum RunReportHTML {
         return out.isEmpty ? out : "<div class=\"shots\">\n" + out + "</div>\n"
     }
 
-    private static func figure(relative: String, slot: RunStepSlot, root: String) -> String {
+    /// A slot whose still was cut out of the recording rather than captured.
+    /// Every branch renders SOMETHING: a frame that could not be produced states
+    /// the moment it stood for and the reason it is missing, so an absence is
+    /// always explained rather than merely absent.
+    private static func recordedFrame(
+        _ record: RunReportRecord,
+        slot: RunStepSlot,
+        frame: RunStepFrame,
+        root: String
+    ) -> String {
+        switch record.extractedFrames[slot] {
+        case let .extracted(relative):
+            return figure(relative: relative, slot: slot, root: root, from: frame)
+        case let .unavailable(reason):
+            return unavailableFrame(slot: slot, frame: frame, reason: reason)
+        case nil:
+            // Only reachable when a bundle is rendered without being materialized
+            // first; still stated rather than dropped.
+            return unavailableFrame(slot: slot, frame: frame, reason: "the frame has not been extracted yet")
+        }
+    }
+
+    private static func unavailableFrame(slot: RunStepSlot, frame: RunStepFrame, reason: String) -> String {
+        "<p class=\"absent\">\(escape(slot.rawValue)) frame unavailable — no screenshot was taken because a"
+            + " screen recording was live, and the still at \(escape(offsetText(frame))) into"
+            + " <code>\(escape(frame.movie))</code> could not be produced: \(escape(reason)).</p>\n"
+    }
+
+    /// Inline one still. `frame` is non-nil when the PNG was cut out of the
+    /// recording, which the caption then says outright — a reader must be able to
+    /// tell a still that was captured at the moment from one reconstructed after
+    /// the fact.
+    private static func figure(relative: String, slot: RunStepSlot, root: String, from frame: RunStepFrame?) -> String {
         // Only ever inline a file the bundle itself owns. The recorded path is
         // normally one this tool wrote, but a report must not become a way to
         // read `../../somewhere` into an HTML document.
         let absolute = URL(fileURLWithPath: root).appendingPathComponent(relative).standardized.path
         let contained = absolute.hasPrefix(URL(fileURLWithPath: root).standardized.path + "/")
+        let noun = frame == nil ? "screenshot" : "frame"
         guard contained,
               let data = try? Data(contentsOf: URL(fileURLWithPath: absolute)), !data.isEmpty
         else {
-            return "<p class=\"absent\">\(escape(slot.rawValue)) screenshot missing: "
+            return "<p class=\"absent\">\(escape(slot.rawValue)) \(noun) missing: "
                 + "<code>\(escape(relative))</code></p>\n"
         }
-        var out = "<figure class=\"shot \(slot.rawValue)\">\n"
-        out += "<img alt=\"\(escape(slot.rawValue)) screenshot\" src=\"data:image/png;base64,"
+        let extra = frame == nil ? "" : " from-recording"
+        var out = "<figure class=\"shot \(slot.rawValue)\(extra)\">\n"
+        out += "<img alt=\"\(escape(slot.rawValue)) \(noun)\" src=\"data:image/png;base64,"
         out += data.base64EncodedString()
         out += "\">\n"
-        out += "<figcaption>\(escape(slot.rawValue)) — <code>\(escape(relative))</code></figcaption>\n"
+        out += "<figcaption>\(escape(slot.rawValue)) — <code>\(escape(relative))</code>"
+        if let frame {
+            out += " <span class=\"provenance\">extracted from the recording"
+            out += " <code>\(escape(frame.movie))</code> at \(escape(offsetText(frame)))</span>"
+        }
+        out += "</figcaption>\n"
         out += "</figure>\n"
         return out
+    }
+
+    /// The marker's position in the movie, rounded to milliseconds so the caption
+    /// stays readable. Never a frame count: the recorder emits frames only on
+    /// change, so its effective rate is variable and no fixed one may be implied.
+    static func offsetText(_ frame: RunStepFrame) -> String {
+        secondsText(frame.offset)
     }
 
     private static func unreadable(line: Int, raw: String) -> String {
@@ -241,7 +292,7 @@ public enum RunReportHTML {
 
     // MARK: - Legend
 
-    private static func legend(redact: Bool) -> String {
+    private static func legend(_ bundle: RunReportBundle, redact: Bool) -> String {
         var out = "<footer>\n<p>Times are UTC. <em>monotonic</em> is the machine's uptime clock, used for "
         out += "ordering; it is not a wall time. Records appear in the order they were appended "
         out += "(completion order); the leading number is the order in which the step was allocated, so "
@@ -249,6 +300,14 @@ public enum RunReportHTML {
         if !redact {
             out += "<p>Screenshots are embedded in this file, so it is self-contained and needs no "
             out += "network access.</p>\n"
+        }
+        if !redact, bundle.carriesRecordedFrames {
+            out += "<p>Stills marked <em>extracted from the recording</em> were not captured at the time. "
+            out += "A screen recording was running, and a second capture would have invalidated it, so the "
+            out += "step's moment was marked and the still was cut out of the movie afterwards — from the "
+            out += "same capture as the video rather than from a separate one. The still is the recorded "
+            out += "frame NEAREST that moment: the recorder writes a frame only when the screen changes, so "
+            out += "there is not one at every instant.</p>\n"
         }
         out += "</footer>\n"
         return out
@@ -356,7 +415,9 @@ public enum RunReportHTML {
     .shots { display: flex; flex-wrap: wrap; gap: .75rem; margin-top: .75rem; }
     .shots figure { flex: 1 1 18rem; margin: 0; }
     .shots img, .video video { border: 1px solid rgba(127,127,127,.35); border-radius: 6px; max-width: 100%; }
+    .shots figure.from-recording img { border-style: dashed; }
     figcaption { color: #777; font-size: .8rem; margin-top: .25rem; }
+    .provenance { font-style: italic; }
     .absent { color: #777; font-style: italic; }
     .capture-error { color: #b04040; }
     footer { border-top: 1px solid rgba(127,127,127,.35); color: #777; font-size: .8rem; margin-top: 2rem; padding-top: .75rem; }

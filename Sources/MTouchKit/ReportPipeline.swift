@@ -8,13 +8,19 @@ public enum ReportOutcome: Equatable, Sendable {
 }
 
 /// Composes `mtouch report`: locate the run bundle → load it (totally, degrading
-/// every absence into a statement) → render deterministic HTML → write it.
+/// every absence into a statement) → materialize the stills its steps deferred to
+/// the recording → render deterministic HTML → write it.
 ///
 /// The command is deliberately NOT itself recorded: it reads a bundle and writes
 /// a derived artifact, so recording it would append to the very trajectory it
 /// just rendered and make the report disagree with its own bundle.
 public enum ReportPipeline {
-    public static func run(runDirectory: String, out: String?, redact: Bool = false) -> ReportOutcome {
+    public static func run(
+        runDirectory: String,
+        out: String?,
+        redact: Bool = false,
+        extractor: RunFrameExtracting = LiveFrameExtractor()
+    ) -> ReportOutcome {
         var isDirectory: ObjCBool = false
         guard FileManager.default.fileExists(atPath: runDirectory, isDirectory: &isDirectory) else {
             return .failed(
@@ -30,7 +36,14 @@ public enum ReportPipeline {
             )
         }
 
-        let bundle = RunReportLoader.load(runDirectory: runDirectory)
+        var bundle = RunReportLoader.load(runDirectory: runDirectory)
+        // Cut the deferred stills out of the movie BEFORE rendering, so the
+        // renderer stays a pure function of its input. Skipped under --redact:
+        // that flag exists to keep imagery out of the render, and materializing
+        // would create new imagery on disk to then omit.
+        if !redact {
+            bundle = RunFrameMaterializer.materialize(bundle, extractor: extractor)
+        }
         let html = RunReportHTML.render(bundle, redact: redact)
         let path = out ?? RunBundle(root: bundle.root).reportPath
         let data = Data(html.utf8)

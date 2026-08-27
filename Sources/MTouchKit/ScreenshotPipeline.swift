@@ -13,11 +13,11 @@ public enum ScreenshotOutcome: Equatable, Sendable {
     case failed(stderr: String, code: MTouchExitCode)
 }
 
-/// Composes the `screenshot` command end-to-end: Screen Recording preflight →
-/// resolve target → resolve path → capture (SCK) → black-capture backstop →
-/// PNG encode → atomic write → stdout line. Each collaborator is injectable so
-/// the flow can be exercised without any SCK/TCC access; the live defaults wire
-/// the real ones.
+/// Composes the `screenshot` command end-to-end: refuse during a live recording →
+/// Screen Recording preflight → resolve target → resolve path → capture (SCK) →
+/// black-capture backstop → PNG encode → atomic write → stdout line. Each
+/// collaborator is injectable so the flow can be exercised without any SCK/TCC
+/// access; the live defaults wire the real ones.
 public enum ScreenshotPipeline {
     public static func run(
         window: String?,
@@ -25,11 +25,25 @@ public enum ScreenshotPipeline {
         directory: String = FileManager.default.currentDirectoryPath,
         now: Date = Date(),
         permissions: PermissionProvider = LivePermissionProvider(),
+        // Supplied by the caller because only the caller knows which run bundle is
+        // in force (`--run-dir` wins over `MTOUCH_RUN_DIR`); the pipeline's job is
+        // only to refuse. Defaults to "nothing is recording", which is exactly
+        // what a caller with no run bundle means.
+        liveRecording: () -> RunRecordingFacts? = { nil },
         capture: (CaptureTarget) -> Result<CapturedImage, ScreenCaptureError> = LiveScreenCapture.capture,
         isBlank: (CGImage) -> Bool = { ScreenCaptureImage.isEffectivelyBlank($0) },
         encode: (CGImage) -> Data? = ScreenCaptureImage.pngData,
         write: (Data, String) -> Result<Void, ScreenCaptureError> = ScreenCaptureWriter.write
     ) -> ScreenshotOutcome {
+        // 0. Refuse while one of our own recordings is live, BEFORE anything else.
+        //    A second capture session from this application invalidates it, and
+        //    the screenshot would still succeed — so the operator would learn of
+        //    the loss much later, from a failing 'record stop'. Exit 1 is
+        //    recoverable; a destroyed recording is not.
+        if let live = liveRecording() {
+            return .failed(stderr: RunRecordingGuard.refusal(live), code: .runtimeFailure)
+        }
+
         // 1. Preflight Screen Recording FIRST. Without the grant, fail fast with
         //    the doctor-pointing diagnostic (exit 2) and produce NO file — the
         //    primary guard against a black/empty capture ever being written.

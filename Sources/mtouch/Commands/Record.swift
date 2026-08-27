@@ -23,13 +23,18 @@ struct Record: ParsableCommand {
         A control file left behind by a crashed recorder is recovered on the next \
         'start', which first reports whether that earlier movie survived.
 
-        DO NOT run 'mtouch screenshot' — or any command with --capture / \
-        MTOUCH_RUN_CAPTURE=1 — while a recording is live. ScreenCaptureKit \
-        invalidates a running stream when a SECOND process of the same binary \
-        opens and closes its own capture session, so the screenshot succeeds and \
-        the recording dies with "application connection interrupted". This is not \
-        silent: the recorder refuses to sign off, and 'record stop' then exits 1 \
-        quoting the failure. Take per-step screenshots or a recording, not both.
+        A recording and per-step stills are NOT mutually exclusive. A second \
+        capture session opened by this same binary invalidates a running stream, \
+        so while a recording is live mtouch never opens one: a command run with \
+        --capture / MTOUCH_RUN_CAPTURE=1 MARKS the moment in its step instead, \
+        and 'mtouch report' cuts the still out of the movie. Those stills come \
+        from the same capture as the video, so they cannot disagree with it.
+
+        Standalone 'mtouch screenshot' has nothing to defer to, so it REFUSES \
+        (exit 1) while a recording is live for the run rather than silently \
+        killing it. Stop the recording, or take the still from it. A recording \
+        started WITHOUT a run directory is not detected by that guard — keep the \
+        recording and the commands in one run bundle.
 
         Recording needs macOS 15 or later and the Screen Recording permission \
         (run 'mtouch doctor'). It captures WHATEVER IS ON SCREEN, including other \

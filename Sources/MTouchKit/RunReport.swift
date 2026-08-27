@@ -25,6 +25,11 @@ public struct RunReportRecord: Sendable, Equatable {
     public let diff: String?
     public let screenshotPath: String?
     public let evidence: RunEvidence
+    /// What `RunFrameMaterializer` made of `evidence.frames`: for each marked
+    /// slot, the PNG it cut out of the recording or the reason it could not.
+    /// Empty until the bundle has been materialized (and for every step that
+    /// carries no marker).
+    public var extractedFrames: [RunStepSlot: RunFrameOutcome] = [:]
 
     /// `0001`-style ordinal, or an em dash for a record written before a run
     /// directory was in play (an operator can still read it, it just has no
@@ -57,6 +62,11 @@ public struct RunReportBundle: Sendable, Equatable {
     public var records: [RunReportRecord] {
         entries.compactMap { if case let .record(record) = $0 { return record } else { return nil } }
     }
+
+    /// Whether any step deferred its still to the recording instead of capturing
+    /// one. Drives the single legend line that explains why some stills read
+    /// differently from the rest.
+    public var carriesRecordedFrames: Bool { records.contains { !$0.evidence.frames.isEmpty } }
 
     public var passedCount: Int { records.filter(\.ok).count }
     public var failedCount: Int { records.filter { !$0.ok }.count }
@@ -134,7 +144,8 @@ public enum RunReportLoader {
                 before: evidence?["before"] as? String,
                 after: evidence?["after"] as? String,
                 state: evidence?["state"] as? String,
-                captureError: evidence?["captureError"] as? String
+                captureError: evidence?["captureError"] as? String,
+                frames: RunEvidence.parseFrames(evidence?["frames"] as? [String: Any])
             )
         )
     }

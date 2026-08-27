@@ -69,7 +69,8 @@ public enum TrajectoryRecorder {
         describe: (Outcome) -> TrajectoryOutcomeInfo,
         now: () -> Double = { ProcessInfo.processInfo.systemUptime },
         wallNow: () -> Double = { Date().timeIntervalSince1970 },
-        capture: RunCapturing = LiveRunCapture()
+        capture: RunCapturing = LiveRunCapture(),
+        recording: RunRecordingProbing = LiveRunRecordingProbe()
     ) throws -> Outcome {
         // Prepare the bundle BEFORE anything else: an unusable run directory must
         // abort the command rather than let it run undocumented.
@@ -92,7 +93,10 @@ public enum TrajectoryRecorder {
         let capturing = run != nil && RunBundle.captureEnabled(environment: environment)
         var evidence = RunEvidence()
         if capturing, let run, let step, let slot = preSlot(for: kind) {
-            collect(into: &evidence, run: run, step: step, slot: slot, capture: capture)
+            collect(
+                into: &evidence, run: run, step: step, slot: slot,
+                capture: capture, recording: recording, wallNow: wallNow
+            )
         }
 
         let sessionPath = SessionStore.sessionFilePath(environment: environment)
@@ -104,7 +108,10 @@ public enum TrajectoryRecorder {
         let info = describe(outcome)
 
         if capturing, let run, let step, let slot = postSlot(for: kind) {
-            collect(into: &evidence, run: run, step: step, slot: slot, capture: capture)
+            collect(
+                into: &evidence, run: run, step: step, slot: slot,
+                capture: capture, recording: recording, wallNow: wallNow
+            )
         }
 
         let postDigest = (kind == .action) ? sessionDigest(sessionPath) : nil
@@ -166,15 +173,37 @@ public enum TrajectoryRecorder {
         }
     }
 
-    /// Capture one slot and fold the result — a relative path, or the reason there
-    /// is none — into `evidence`. Never throws and never alters the operation.
+    /// Record one slot's evidence and fold the result — a relative path, a frame
+    /// marker, or the reason there is neither — into `evidence`. Never throws and
+    /// never alters the operation.
+    ///
+    /// The recording is probed PER SLOT rather than once per step, because the
+    /// question is about the instant a capture would happen: a recording that
+    /// ended between a command's `before` and its `after` makes the `after` an
+    /// ordinary capture again, and one that started in between must not be walked
+    /// into.
     private static func collect(
         into evidence: inout RunEvidence,
         run: RunBundle,
         step: RunStep,
         slot: RunStepSlot,
-        capture: RunCapturing
+        capture: RunCapturing,
+        recording: RunRecordingProbing,
+        wallNow: () -> Double
     ) {
+        // A second capture session from this same application invalidates the
+        // recording this application is already running — measured, reproducible,
+        // and independent of which capture API is used. So while ours is live we
+        // open none: the moment is MARKED and `mtouch report` cuts the still out
+        // of the movie. That still comes from the same capture as the video,
+        // which is better evidence than a second one taken beside it.
+        if let live = recording.liveRecording(for: run) {
+            switch marker(for: live, run: run, at: wallNow()) {
+            case let .success(frame): evidence.frames[slot] = frame
+            case let .failure(failure): evidence.note(failure: failure.diagnostic, slot: slot)
+            }
+            return
+        }
         switch capture.capturePNG() {
         case let .success(data):
             switch run.writeStepImage(data, step: step, slot: slot) {
@@ -184,6 +213,40 @@ public enum TrajectoryRecorder {
         case let .failure(failure):
             evidence.note(failure: failure.diagnostic, slot: slot)
         }
+    }
+
+    /// Where in `live`'s movie this moment sits, or why it cannot be located.
+    ///
+    /// A marker that cannot be placed is a recorded FAILURE, exactly like a
+    /// capture that could not be taken: the step says so and the documented
+    /// command keeps its own exit code.
+    static func marker(
+        for live: RunRecordingFacts,
+        run: RunBundle,
+        at wall: Double
+    ) -> Result<RunStepFrame, RunCaptureFailure> {
+        guard !live.movie.isEmpty else {
+            return .failure(RunCaptureFailure(
+                "mtouch: a recording is live but names no movie, so this step's frame could not be marked."
+            ))
+        }
+        guard live.startedAt.isFinite, live.startedAt > 0 else {
+            return .failure(RunCaptureFailure(
+                "mtouch: the live recording carries no start time, so this step's frame could not be marked."
+            ))
+        }
+        let offset = wall - live.startedAt
+        guard offset.isFinite, offset >= 0 else {
+            return .failure(RunCaptureFailure(
+                "mtouch: this step is dated before the live recording started, so its frame could not be marked."
+            ))
+        }
+        return .success(RunStepFrame(
+            movie: run.relativePath(forAbsolute: live.movie),
+            offset: offset,
+            recordingStartedAt: live.startedAt,
+            wallClock: wall
+        ))
     }
 
     // MARK: - File handling

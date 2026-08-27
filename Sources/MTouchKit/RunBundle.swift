@@ -61,25 +61,38 @@ public struct RunStep: Sendable, Equatable {
     }
 }
 
-/// The evidence a single record collected: the step images that were written and,
-/// when a capture failed, WHY. A capture failure is data in the record — never an
-/// error that propagates — because an evidence system that can fail the run it is
-/// documenting is worse than none.
+/// The evidence a single record collected: the step images that were written,
+/// the moments MARKED inside a live recording instead of being captured, and —
+/// when either failed — WHY. A failure is data in the record, never an error that
+/// propagates, because an evidence system that can fail the run it is documenting
+/// is worse than none.
 public struct RunEvidence: Sendable, Equatable {
     public var before: String?
     public var after: String?
     public var state: String?
     public var captureError: String?
+    /// Slots whose still was NOT captured because a recording was live, each
+    /// carrying where in the movie the moment sits. `mtouch report` materializes
+    /// these into `steps/` PNGs under the very same names a direct capture would
+    /// have used.
+    public var frames: [RunStepSlot: RunStepFrame]
 
-    public init(before: String? = nil, after: String? = nil, state: String? = nil, captureError: String? = nil) {
+    public init(
+        before: String? = nil,
+        after: String? = nil,
+        state: String? = nil,
+        captureError: String? = nil,
+        frames: [RunStepSlot: RunStepFrame] = [:]
+    ) {
         self.before = before
         self.after = after
         self.state = state
         self.captureError = captureError
+        self.frames = frames
     }
 
     public var isEmpty: Bool {
-        before == nil && after == nil && state == nil && captureError == nil
+        before == nil && after == nil && state == nil && captureError == nil && frames.isEmpty
     }
 
     public subscript(slot: RunStepSlot) -> String? {
@@ -113,8 +126,28 @@ public struct RunEvidence: Sendable, Equatable {
         if let after { fields.append("\"after\":\(JSONText.string(after))") }
         if let before { fields.append("\"before\":\(JSONText.string(before))") }
         if let captureError { fields.append("\"captureError\":\(JSONText.string(captureError))") }
+        if !frames.isEmpty {
+            let body = frames.keys.sorted { $0.rawValue < $1.rawValue }.map { slot in
+                "\(JSONText.string(slot.rawValue)):\(frames[slot]!.jsonObject())"
+            }.joined(separator: ",")
+            fields.append("\"frames\":{\(body)}")
+        }
         if let state { fields.append("\"state\":\(JSONText.string(state))") }
         return "{" + fields.joined(separator: ",") + "}"
+    }
+
+    /// Parse the `frames` object of a recorded evidence blob, dropping any entry
+    /// whose slot or marker is unreadable.
+    static func parseFrames(_ object: [String: Any]?) -> [RunStepSlot: RunStepFrame] {
+        guard let object else { return [:] }
+        var frames: [RunStepSlot: RunStepFrame] = [:]
+        for (key, value) in object {
+            guard let slot = RunStepSlot(rawValue: key),
+                  let marker = (value as? [String: Any]).flatMap(RunStepFrame.parse)
+            else { continue }
+            frames[slot] = marker
+        }
+        return frames
     }
 }
 
@@ -232,6 +265,12 @@ public struct RunBundle: Sendable, Equatable {
     public var reportPath: String { child(RunBundle.reportFileName) }
     public var stepsDirectory: String { child(RunBundle.stepsDirectoryName) }
     public var videoDirectory: String { child(RunBundle.videoDirectoryName) }
+    /// The handshake file a recording into THIS bundle publishes. It is where
+    /// `RecordPlan` puts it for a run directory, named here so anything asking
+    /// "is a recording live for this run?" reads the one true location.
+    public var recordControlPath: String {
+        URL(fileURLWithPath: videoDirectory).appendingPathComponent(RecordPlan.controlFileName).path
+    }
     var lockPath: String { child(RunBundle.lockFileName) }
 
     public func child(_ name: String) -> String {
@@ -241,6 +280,20 @@ public struct RunBundle: Sendable, Equatable {
     /// The absolute path of a run-root-relative path recorded in a step's evidence.
     public func absolutePath(forRelative relative: String) -> String {
         URL(fileURLWithPath: root).appendingPathComponent(relative).path
+    }
+
+    /// `absolute` expressed relative to the run root when it sits inside the
+    /// bundle, unchanged otherwise.
+    ///
+    /// The inverse of `absolutePath(forRelative:)`, and the reason a recorded
+    /// path survives the bundle being moved or archived. A movie written outside
+    /// the bundle (`record start --out …`) cannot be made relative, so it is
+    /// recorded as what it is.
+    public func relativePath(forAbsolute absolute: String) -> String {
+        let base = URL(fileURLWithPath: root).standardized.path
+        let target = URL(fileURLWithPath: absolute).standardized.path
+        guard target.hasPrefix(base + "/") else { return absolute }
+        return String(target.dropFirst(base.count + 1))
     }
 
     // MARK: - Opening

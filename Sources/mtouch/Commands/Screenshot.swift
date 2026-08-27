@@ -44,7 +44,13 @@ struct Screenshot: ParsableCommand {
             run: runOptions,
             describe: { (outcome: ScreenshotOutcome) in outcome.trajectoryInfo }
         ) {
-            ScreenshotPipeline.run(window: window, out: out)
+            ScreenshotPipeline.run(
+                window: window,
+                out: out,
+                // The merged environment, so --run-dir is honoured the same way
+                // the trajectory record is.
+                liveRecording: { RunRecordingGuard.liveRecording(environment: runOptions.environment()) }
+            )
         }
         switch outcome {
         case let .written(_, message):

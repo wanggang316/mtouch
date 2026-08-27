@@ -208,7 +208,7 @@ public enum MCPToolDispatch {
         case "snapshot": return snapshot(arguments, environment: environment, permissions: permissions)
         case "act": return act(arguments, environment: environment, permissions: permissions)
         case "wait": return wait(arguments, permissions: permissions)
-        case "screenshot": return screenshot(arguments, permissions: permissions)
+        case "screenshot": return screenshot(arguments, environment: environment, permissions: permissions)
         case "apps": return apps(arguments)
         case "windows": return windows(arguments, permissions: permissions)
         case "doctor": return doctor(arguments, permissions: permissions)
@@ -488,9 +488,16 @@ public enum MCPToolDispatch {
 
     // MARK: - screenshot
 
-    private static func screenshot(_ args: ToolArguments, permissions: PermissionProvider) -> ToolResult {
+    private static func screenshot(
+        _ args: ToolArguments,
+        environment: [String: String],
+        permissions: PermissionProvider
+    ) -> ToolResult {
         let outcome = ScreenshotPipeline.run(
-            window: args.string("window"), out: args.string("out"), permissions: permissions
+            window: args.string("window"), out: args.string("out"), permissions: permissions,
+            // Same refusal as the CLI: an MCP client must not be able to destroy
+            // the recording of the run it is being observed in either.
+            liveRecording: { RunRecordingGuard.liveRecording(environment: environment) }
         )
         switch outcome {
         case let .written(path, message):

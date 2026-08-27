@@ -20,9 +20,16 @@ struct Report: ParsableCommand {
         nothing in it comes from the moment of rendering — so two renders of one \
         bundle are byte-identical and can be diffed.
 
+        Steps recorded while a screen recording was live carry no screenshot — one \
+        would have invalidated the recording — but a marker naming the moment. \
+        Rendering CUTS those stills out of the movie into steps/ and labels them \
+        'extracted from the recording', so their provenance is never confused with \
+        a directly captured one. An already-extracted still is reused rather than \
+        cut again, which is what keeps two renders byte-identical.
+
         Anything absent is stated rather than faked: a missing run.json, an empty or \
-        damaged trajectory, a missing screenshot, and an absent recording each \
-        render as a plain note.
+        damaged trajectory, a missing screenshot, a frame that could not be cut out \
+        of the movie, and an absent recording each render as a plain note.
 
         A report carries whatever was on screen, and the trajectory strips payload \
         arguments only from FAILED records — so a SUCCESSFUL 'act type <secret>' is \
