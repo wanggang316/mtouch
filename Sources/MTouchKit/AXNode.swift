@@ -22,6 +22,15 @@ public struct AXNode: Equatable, Sendable {
     /// `kAXValueAttribute` rendered to a string (see `AXValueRendering`); nil
     /// when absent or of a type not rendered at this layer.
     public var value: String?
+    /// `kAXDescriptionAttribute` — the ACCESSIBILITY LABEL; nil when absent or
+    /// empty. A great many macOS controls put their user-visible name here and
+    /// expose no title, so this is a first-class label source, not a footnote
+    /// (see `SnapshotText.label(for:)`).
+    public var description: String?
+    /// `kAXIdentifierAttribute` — the developer-set, non-localized identity of a
+    /// control; nil when absent or empty. Last-resort label, and the only one a
+    /// control with neither title nor description has.
+    public var identifier: String?
     /// Element frame; nil when position/size are unreadable.
     public var frame: CGRect?
     /// `kAXEnabledAttribute`; defaults to true when the attribute is absent.
@@ -43,6 +52,8 @@ public struct AXNode: Equatable, Sendable {
         subrole: String? = nil,
         title: String? = nil,
         value: String? = nil,
+        description: String? = nil,
+        identifier: String? = nil,
         frame: CGRect? = nil,
         enabled: Bool = true,
         actionable: Bool = false,
@@ -54,6 +65,8 @@ public struct AXNode: Equatable, Sendable {
         self.subrole = subrole
         self.title = title
         self.value = value
+        self.description = description
+        self.identifier = identifier
         self.frame = frame
         self.enabled = enabled
         self.actionable = actionable
@@ -71,6 +84,8 @@ public struct AXNode: Equatable, Sendable {
             subrole: attributes.subrole,
             title: attributes.title,
             value: attributes.value,
+            description: attributes.description,
+            identifier: attributes.identifier,
             frame: attributes.frame,
             enabled: attributes.enabled,
             actionable: AXActionable.isActionable(role: attributes.role, actionNames: attributes.actionNames),
@@ -122,6 +137,41 @@ public enum AXActionable {
     }
 }
 
+// MARK: - Label usability
+
+/// Which of a node's identifying strings may stand in for a missing title.
+///
+/// The only judgement here is about `identifier`, and it is a necessary one:
+/// AppKit synthesizes an identifier of the form `_NS:<n>` for views decoded from
+/// a nib, so most stock Cocoa applications expose one on nearly every element
+/// (measured on the system text editor: 10 of its 11 identifiers). Those strings
+/// name nothing — they are nib decoding indices that change between builds — and
+/// presenting `"_NS:8"` where a name belongs is WORSE than presenting nothing: an
+/// empty label is honest about knowing nothing, while a synthetic one looks like
+/// information, costs tokens on every line, and invites an agent to address an
+/// element by a string that will not survive the next release.
+public enum AXLabel {
+    /// The prefix AppKit gives its auto-generated view identifiers.
+    static let syntheticIdentifierPrefix = "_NS:"
+
+    /// The node's identifier when it is a real, developer-set name; nil when it
+    /// is absent, empty, or synthesized by AppKit.
+    ///
+    /// Applied by the LABEL slot and by the content predicate — the two places
+    /// where a synthetic string would masquerade as meaning. It is deliberately
+    /// NOT applied to criteria matching or to JSON: those surfaces carry the
+    /// attribute verbatim, so a caller who has seen `"_NS:8"` in JSON can still
+    /// match on it. The two risks are not symmetric — a label slot must not show
+    /// a false name, while a criteria substring is explicit and never accidental.
+    public static func usableIdentifier(of node: AXNode) -> String? {
+        guard let identifier = node.identifier,
+              !identifier.isEmpty,
+              !identifier.hasPrefix(syntheticIdentifierPrefix)
+        else { return nil }
+        return identifier
+    }
+}
+
 // MARK: - Empty-tree predicate
 
 /// Whether a walked tree is "effectively empty" — the trigger for the
@@ -145,16 +195,30 @@ public func isEffectivelyEmpty(_ roots: [AXNode]) -> Bool {
     return true
 }
 
-/// Whether a node carries readable text: a non-empty value, or a static-text
-/// element with a non-empty title. (A window's own title is not text content;
+/// Whether a node carries readable content: a non-empty value, a static-text
+/// element with a non-empty title, or an ACCESSIBILITY LABEL of its own
+/// (`description` / `identifier`). (A window's own title is not text content;
 /// this predicate is applied to descendants, never to the window node.)
+///
+/// The label clause is what keeps a labelled-but-titleless element from being
+/// mistaken for an empty one. A container whose only identification is
+/// `AXDescription "Keypad"` is NOT the contentless wrapper the noise filter
+/// drops, and a window subtree built entirely from such elements is NOT the
+/// blank tree that triggers the AXManualAccessibility fallback: in both cases
+/// the app did answer, it just answered somewhere other than `title`.
+/// `identifier` counts alongside `description` because it is equally an answer —
+/// it is the label the renderer will fall back to, so dropping the node would
+/// drop an element an agent can see and name. It counts only when it is a real
+/// one (see `AXLabel.usableIdentifier`): an AppKit-synthesized `_NS:<n>` says
+/// nothing about the element and must not resurrect an otherwise empty wrapper.
 func nodeHasTextContent(_ node: AXNode) -> Bool {
-    if let value = node.value, !value.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-        return true
-    }
-    if node.role == kAXStaticTextRole,
-       let title = node.title, !title.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-        return true
-    }
+    if let value = node.value, !isBlank(value) { return true }
+    if node.role == kAXStaticTextRole, let title = node.title, !isBlank(title) { return true }
+    if let description = node.description, !isBlank(description) { return true }
+    if let identifier = AXLabel.usableIdentifier(of: node), !isBlank(identifier) { return true }
     return false
+}
+
+private func isBlank(_ string: String) -> Bool {
+    string.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
 }

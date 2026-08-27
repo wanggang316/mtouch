@@ -6,10 +6,19 @@ import CoreGraphics
 /// both surfaces list the same nodes and refs, but it does NOT truncate — JSON
 /// carries the complete filtered model, geometry included.
 ///
-/// Per-element key order: `role`, `subrole?`, `title?`, `value?`, `ref?`,
-/// `enabled`, `frame?`, `scrollPosition?`, `children`. Values are RAW (real
-/// characters); `JSONText.string` handles escaping. Secure-field values are
-/// masked here TOO — the real secret never appears.
+/// Per-element key order: `role`, `subrole?`, `title?`, `description?`,
+/// `identifier?`, `value?`, `ref?`, `enabled`, `frame?`, `scrollPosition?`,
+/// `children`. Values are RAW (real characters); `JSONText.string` handles
+/// escaping. Secure-field values are masked here TOO — the real secret never
+/// appears.
+///
+/// `description` and `identifier` sit immediately after `title` because they are
+/// the same KIND of fact — the element's identification — and a machine consumer
+/// reading them adjacently never has to guess which attribute the text surface
+/// collapsed into its single label slot. Unlike that surface, JSON keeps FULL
+/// precision: every attribute the element exposes is its own field, and a field
+/// is omitted (not emitted empty) when the attribute is absent, so the key order
+/// of an element that carries neither is unchanged.
 public enum SnapshotJSON {
     public static func render(_ snapshot: Snapshot) -> String {
         // One O(n) noise pass per root; recursion then reads precomputed verdicts.
@@ -47,6 +56,12 @@ public enum SnapshotJSON {
         var fields: [String] = ["\"role\":\(JSONText.string(node.role))"]
         if let subrole = node.subrole { fields.append("\"subrole\":\(JSONText.string(subrole))") }
         if let title = node.title { fields.append("\"title\":\(JSONText.string(title))") }
+        if let description = node.description {
+            fields.append("\"description\":\(JSONText.string(description))")
+        }
+        if let identifier = node.identifier {
+            fields.append("\"identifier\":\(JSONText.string(identifier))")
+        }
         if let value = SecureField.renderedValue(of: node) {
             fields.append("\"value\":\(JSONText.string(value))")
         }

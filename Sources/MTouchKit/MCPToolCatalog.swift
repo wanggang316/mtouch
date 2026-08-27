@@ -70,7 +70,13 @@ public enum MCPToolCatalog {
         Spec(
             name: "snapshot",
             description: "Capture an accessibility snapshot of an application, "
-                + "assigning element references (e.g. e5) usable by the act tool.",
+                + "assigning element references (e.g. e5) usable by the act tool. "
+                + "Each line labels its element with the first of title, value, "
+                + "accessibility description, or developer identifier that it has; a "
+                + "label taken from the last two is marked @desc or @id, so 'AXButton "
+                + "\"Seven\"@id' is a button with no title whose identifier is Seven. "
+                + "Quote that same label in a wait/read criteria to address it. With "
+                + "json every attribute is a separate field instead.",
             properties: [
                 Property(name: "app", type: "string",
                          description: "Bundle identifier of the target application, e.g. com.apple.TextEdit."),
@@ -136,11 +142,16 @@ public enum MCPToolCatalog {
                          description: "Bundle identifier of the target application."),
                 pidProperty,
                 Property(name: "appears", type: "string",
-                         description: "Wait until an element matching this criteria appears, e.g. 'button \"Save\"'."),
+                         description: "Wait until an element matching this criteria appears, e.g. "
+                             + "'button \"Save\"'. The quoted substring is matched over the element's "
+                             + "title, value, description, and identifier — including a label snapshot "
+                             + "marked @desc or @id."),
                 Property(name: "disappears", type: "string",
                          description: "Wait until an element matching this criteria disappears."),
                 Property(name: "text", type: "string",
-                         description: "Wait until this text becomes visible."),
+                         description: "Wait until this text becomes visible. Matched over title and "
+                             + "value only — the strings a user can see — never over a developer "
+                             + "identifier."),
                 Property(name: "valueEquals", type: "string",
                          description: "Wait until an element's value equals this string."),
                 Property(name: "stable", type: "boolean",
@@ -256,7 +267,8 @@ public enum MCPToolCatalog {
                 pidProperty,
                 Property(name: "of", type: "string",
                          description: "Read every element matching this criteria, e.g. 'group \"answer\"' "
-                             + "(the same criteria grammar the wait tool takes). EVERY match is returned, "
+                             + "(the same criteria grammar the wait tool takes, matched over title, "
+                             + "value, description, and identifier). EVERY match is returned, "
                              + "in document order — several matches are separated by a blank line, or come "
                              + "back as an array of {role, text} with json. Nothing matching is an error "
                              + "naming the criteria, never an empty result."),

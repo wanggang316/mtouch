@@ -43,6 +43,8 @@ final class FakeTreeProvider: AXTreeProvider {
             subrole: element.subrole,
             title: element.title,
             value: element.value,
+            description: element.description,
+            identifier: element.identifier,
             frame: element.frame,
             enabled: element.enabled,
             actionNames: element.actionable ? [kAXPressAction] : [],

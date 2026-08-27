@@ -10,6 +10,16 @@ public struct AXAttributes: Equatable, Sendable {
     public var subrole: String?
     public var title: String?
     public var value: String?
+    /// `kAXDescriptionAttribute` — the ACCESSIBILITY LABEL. Many stock macOS
+    /// controls (and every SwiftUI control given `.accessibilityLabel`) carry
+    /// their user-visible name here and expose NO title at all, so without this
+    /// they are indistinguishable from one another. Nil when absent or empty.
+    public var description: String?
+    /// `kAXIdentifierAttribute` — the developer-set, non-localized identity of a
+    /// control (e.g. "AllClear"). Stable across languages and the last usable
+    /// label for a control that has neither title nor description. Nil when
+    /// absent or empty.
+    public var identifier: String?
     public var frame: CGRect?
     public var enabled: Bool
     /// Names from `AXUIElementCopyActionNames`, e.g. ["AXPress"].
@@ -21,6 +31,8 @@ public struct AXAttributes: Equatable, Sendable {
         subrole: String? = nil,
         title: String? = nil,
         value: String? = nil,
+        description: String? = nil,
+        identifier: String? = nil,
         frame: CGRect? = nil,
         enabled: Bool = true,
         actionNames: [String] = [],
@@ -30,6 +42,8 @@ public struct AXAttributes: Equatable, Sendable {
         self.subrole = subrole
         self.title = title
         self.value = value
+        self.description = description
+        self.identifier = identifier
         self.frame = frame
         self.enabled = enabled
         self.actionNames = actionNames
@@ -142,6 +156,17 @@ public enum AXValueRendering {
         return nil
     }
 
+    /// A LABEL attribute (`kAXDescriptionAttribute`, `kAXIdentifierAttribute`)
+    /// rendered to a string, with the EMPTY string normalized to nil. Apps
+    /// routinely answer these reads with `""` rather than refusing them, and an
+    /// empty label is the same fact as no label — normalizing here keeps that
+    /// single fact from reaching the renderers as two different ones (an empty
+    /// JSON field, a label slot that renders blank).
+    public static func label(from value: CFTypeRef?) -> String? {
+        guard let string = value as? String, !string.isEmpty else { return nil }
+        return string
+    }
+
     /// Decodes a boolean attribute (e.g. `kAXEnabledAttribute`). Returns nil for
     /// unreadable / non-boolean values so callers can apply their own default.
     public static func bool(from value: CFTypeRef?) -> Bool? {
@@ -195,6 +220,12 @@ public struct LiveTreeProvider: AXTreeProvider {
             subrole: AXSupport.copyAttribute(element, kAXSubroleAttribute) as? String,
             title: AXSupport.copyAttribute(element, kAXTitleAttribute) as? String,
             value: AXValueRendering.string(from: AXSupport.copyAttribute(element, kAXValueAttribute)),
+            description: AXValueRendering.label(
+                from: AXSupport.copyAttribute(element, kAXDescriptionAttribute)
+            ),
+            identifier: AXValueRendering.label(
+                from: AXSupport.copyAttribute(element, kAXIdentifierAttribute)
+            ),
             frame: AXSupport.frame(of: element),
             enabled: AXValueRendering.bool(from: AXSupport.copyAttribute(element, kAXEnabledAttribute)) ?? true,
             actionNames: Self.actionNames(of: element),

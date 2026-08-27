@@ -11,10 +11,17 @@ struct Wait: ParsableCommand {
         or the timeout expires. Exactly one condition flag is required.
 
         A CRITERIA is a role name optionally followed by a quoted substring matched \
-        over an element's title and value, e.g. 'textarea' or 'button "Save"'. \
-        Friendly role names map to AX roles (textarea → AXTextArea, button → \
+        over an element's title, value, description, and identifier, e.g. 'textarea' \
+        or 'button "Save"'. Those last two are what a control labelled only by its \
+        accessibility description or developer identifier matches on — snapshot marks \
+        such a label with @desc / @id, and the marked string is exactly what to quote \
+        here. Friendly role names map to AX roles (textarea → AXTextArea, button → \
         AXButton, window → AXWindow, menu → AXMenu); a raw AX role is also accepted. \
         A role that matches nothing simply times out (exit 4).
+
+        --text is narrower on purpose: it matches only title and value, the strings \
+        that are actually VISIBLE, so an invisible developer identifier never counts \
+        as text on screen.
 
         --stable waits for QUIESCENCE: the watched tree must stop changing, not \
         merely start containing something. Scope it with --of; without --of the \

@@ -1,7 +1,10 @@
 import Foundation
 
 /// A wait CRITERIA: an accessibility role, optionally narrowed by a quoted
-/// substring matched over an element's title+value.
+/// substring matched over an element's title, value, description, and
+/// identifier — every string that identifies it, so a control labelled only by
+/// `AXDescription`/`AXIdentifier` is addressable by the very name the snapshot
+/// printed for it.
 ///
 /// The grammar is `<role> ["<substring>"]`, e.g. `textarea` or `button "Save"`.
 /// Friendly role names map to AX roles (`textarea` → `AXTextArea`); a raw AX
@@ -11,8 +14,8 @@ import Foundation
 public struct WaitCriteria: Equatable, Sendable {
     /// Resolved AX role matched literally against `AXNode.role`.
     public let role: String
-    /// Optional substring required within an element's title or value; nil means
-    /// role alone is enough.
+    /// Optional substring required within an element's title, value,
+    /// description, or identifier; nil means role alone is enough.
     public let substring: String?
 
     public init(role: String, substring: String? = nil) {
@@ -169,14 +172,36 @@ public enum WaitEvaluator {
     }
 
     /// Whether a node satisfies a criteria: role matched literally, and — when a
-    /// substring is given — that substring present in the title or value.
+    /// substring is given — that substring present in any of the node's
+    /// IDENTIFYING strings (see `criteriaContains`).
     static func matches(_ node: AXNode, _ criteria: WaitCriteria) -> Bool {
         guard node.role == criteria.role else { return false }
         guard let substring = criteria.substring else { return true }
-        return textContains(node, substring)
+        return criteriaContains(node, substring)
     }
 
-    /// Whether the substring appears in a node's title or value.
+    /// Whether the substring appears in ANY string that identifies the node:
+    /// title, value, description (the accessibility label), or identifier (the
+    /// developer-set identity).
+    ///
+    /// Wider than `textContains` on purpose. A criteria's job is to ADDRESS an
+    /// element, and the substring an agent has to work with is whatever the
+    /// snapshot showed it — which, for the many controls that expose no title, is
+    /// the description or the identifier. Searching only title+value would make
+    /// `button "Seven"` un-writable for exactly the elements that most need
+    /// addressing by name.
+    static func criteriaContains(_ node: AXNode, _ substring: String) -> Bool {
+        if textContains(node, substring) { return true }
+        if let description = node.description, description.contains(substring) { return true }
+        if let identifier = node.identifier, identifier.contains(substring) { return true }
+        return false
+    }
+
+    /// Whether the substring appears in a node's title or value — the strings a
+    /// user can actually SEE. Deliberately narrower than `criteriaContains`: this
+    /// backs `--text` ("wait until this text is visible"), and an identifier is a
+    /// developer string that is never displayed, so matching it here would report
+    /// text as visible that no one can read.
     static func textContains(_ node: AXNode, _ substring: String) -> Bool {
         if let title = node.title, title.contains(substring) { return true }
         if let value = node.value, value.contains(substring) { return true }

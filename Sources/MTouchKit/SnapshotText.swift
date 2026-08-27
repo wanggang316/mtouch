@@ -1,9 +1,12 @@
 /// Compact, ref-annotated TEXT rendering of a `Snapshot`.
 ///
-/// One node per line: `<indent><role> [subrole] "<title-or-value>" [#ref] [disabled]`.
+/// One node per line: `<indent><role> [subrole] "<label>"[@src] [#ref] [disabled]`.
 /// Geometry is intentionally omitted here (it lives in JSON); refs appear only on
 /// actionable nodes. Multi-line values are escaped (`\n`, `\t`) so every node
 /// stays on a single line.
+///
+/// `@src` is the LABEL PROVENANCE marker (see `SnapshotText.label(for:)`), present
+/// only when the label did not come from the element's title.
 ///
 /// `line(for:ref:indent:)` renders ONE node and is deliberately kept public and
 /// self-contained so the diff engine can emit added/removed/changed lines in
@@ -51,22 +54,66 @@ public enum SnapshotText {
     public static func line(for node: AXNode, ref: String?, indent: Int) -> String {
         var tokens: [String] = [node.role]
         if let subrole = node.subrole { tokens.append("[\(subrole)]") }
-        tokens.append("\"\(displayString(for: node))\"")
+        let label = label(for: node)
+        tokens.append("\"\(label.text)\"" + (label.source.marker ?? ""))
         if let ref { tokens.append("#\(ref)") }
         if !node.enabled { tokens.append("[disabled]") }
         return String(repeating: "  ", count: max(0, indent)) + tokens.joined(separator: " ")
     }
 
-    /// The `<title-or-value>` slot: a human label when available, else the
-    /// (masked-if-secure) value. Escaped so it stays on one line.
-    static func displayString(for node: AXNode) -> String {
+    /// Where a rendered label came from. The text surface is the token-budgeted,
+    /// agent-facing view, so it shows exactly ONE label per node — but an agent
+    /// that reads `AXButton "Seven"` must not conclude the button's TITLE is
+    /// "Seven" (it has none; the string came from `AXIdentifier`), because that
+    /// belief drives what it types into a criteria and what it expects from a
+    /// diff. The marker states the provenance in one trailing token, and is
+    /// ABSENT for the title case so every title-bearing line is byte-identical to
+    /// what this renderer has always emitted.
+    enum LabelSource {
+        /// `kAXTitleAttribute`, or the node's value — the two sources this
+        /// surface has always rendered, and the ones it renders unmarked.
+        case titleOrValue
+        /// `kAXDescriptionAttribute`, the accessibility label.
+        case description
+        /// `kAXIdentifierAttribute`, the developer-set identity.
+        case identifier
+
+        /// The compact suffix appended directly to the closing quote (no space,
+        /// so it reads as part of the label slot rather than as another token).
+        var marker: String? {
+            switch self {
+            case .titleOrValue: return nil
+            case .description: return "@desc"
+            case .identifier: return "@id"
+            }
+        }
+    }
+
+    /// The label slot: the first available of TITLE → VALUE → DESCRIPTION →
+    /// IDENTIFIER, escaped so it stays on one line, paired with its provenance.
+    ///
+    /// Title and value keep their long-standing precedence: a control's value is
+    /// its CONTENT (what a text field holds, what a checkbox is set to) and
+    /// showing a static accessibility label in its place would hide the very
+    /// thing an agent is reading the tree for. Description and identifier are
+    /// consulted only when neither exists — which is exactly the case that made
+    /// whole applications unusable, where every control rendered as `""` and no
+    /// two of them could be told apart. An AppKit-SYNTHESIZED identifier is not a
+    /// name and never fills the slot (see `AXLabel.usableIdentifier`).
+    static func label(for node: AXNode) -> (text: String, source: LabelSource) {
         if let title = node.title, !title.isEmpty {
-            return escapeInline(title)
+            return (escapeInline(title), .titleOrValue)
         }
-        if let value = SecureField.renderedValue(of: node) {
-            return escapeInline(value)
+        if let value = SecureField.renderedValue(of: node), !value.isEmpty {
+            return (escapeInline(value), .titleOrValue)
         }
-        return ""
+        if let description = node.description, !description.isEmpty {
+            return (escapeInline(description), .description)
+        }
+        if let identifier = AXLabel.usableIdentifier(of: node) {
+            return (escapeInline(identifier), .identifier)
+        }
+        return ("", .titleOrValue)
     }
 
     static func truncationMarker(omitted: Int) -> String {

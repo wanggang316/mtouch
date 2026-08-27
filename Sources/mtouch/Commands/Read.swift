@@ -25,10 +25,11 @@ struct Read: ParsableCommand {
         that have none.
 
         A CRITERIA is the same grammar 'mtouch wait --of' takes: a role name \
-        optionally followed by a quoted substring matched over an element's title and \
-        value, e.g. 'textarea' or 'group "answer"'. Friendly role names map to AX \
-        roles (group → AXGroup, statictext → AXStaticText); a raw AX role is also \
-        accepted.
+        optionally followed by a quoted substring matched over an element's title, \
+        value, description, and identifier, e.g. 'textarea' or 'group "answer"'. A \
+        label that 'mtouch snapshot' marked with @desc or @id came from the last two, \
+        and quoting it here matches. Friendly role names map to AX roles (group → \
+        AXGroup, statictext → AXStaticText); a raw AX role is also accepted.
 
         SEVERAL matches are all printed, in document order, separated by a blank line \
         — never just the first one; with --json they come back as an array of \
