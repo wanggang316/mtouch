@@ -85,10 +85,17 @@ public struct TrajectoryOutcomeInfo: Sendable, Equatable {
     public let diff: String?
     public let screenshotPath: String?
     /// `false` when the action DELIVERED input without reading the accessibility
-    /// tree (`--no-verify`), so the record can say so in a field of its own. nil
-    /// means the ordinary contract held: the action was verified against a
+    /// tree — either because `--no-verify` asked for that, or because delivery
+    /// itself could not be confirmed and there was nothing left to verify against.
+    /// nil means the ordinary contract held: the action was verified against a
     /// post-action walk, or the record is not an action at all.
     public let verified: Bool?
+    /// `false` when the action's events were POSTED but the bounded flush could not
+    /// establish that the window server processed them. Distinct from `verified`
+    /// and strictly stronger: `verified == false` alone says the EFFECT went
+    /// unchecked, this says the DELIVERY did. nil means the question does not
+    /// arise — nothing was posted, or the posted events were confirmed.
+    public let deliveryConfirmed: Bool?
 
     public init(
         ok: Bool,
@@ -96,7 +103,8 @@ public struct TrajectoryOutcomeInfo: Sendable, Equatable {
         errorClass: String?,
         diff: String? = nil,
         screenshotPath: String? = nil,
-        verified: Bool? = nil
+        verified: Bool? = nil,
+        deliveryConfirmed: Bool? = nil
     ) {
         self.ok = ok
         self.exit = exit
@@ -104,6 +112,7 @@ public struct TrajectoryOutcomeInfo: Sendable, Equatable {
         self.diff = diff
         self.screenshotPath = screenshotPath
         self.verified = verified
+        self.deliveryConfirmed = deliveryConfirmed
     }
 }
 
@@ -133,11 +142,16 @@ struct TrajectoryRecord {
     let diff: String?
     let screenshotPath: String?
     /// Present — and only ever `false` — when the action delivered input WITHOUT
-    /// reading the accessibility tree (`--no-verify`). Such a record also carries
-    /// no `diff`, because none was taken. Its ABSENCE is the ordinary case: the
-    /// action was verified against a post-action walk, and the `diff` is that
-    /// verification.
+    /// reading the accessibility tree (`--no-verify`, or a delivery too doubtful to
+    /// be worth verifying). Such a record also carries no `diff`, because none was
+    /// taken. Its ABSENCE is the ordinary case: the action was verified against a
+    /// post-action walk, and the `diff` is that verification.
     let verified: Bool?
+    /// Present — and only ever `false` — when the action's events were posted but
+    /// the bounded flush could not confirm the window server processed them. It
+    /// always accompanies `verified: false` and says strictly more: not merely that
+    /// the effect went unchecked, but that the input's ARRIVAL is unestablished.
+    let deliveryConfirmed: Bool?
     /// The run bundle's step ordinal for this record; present only when a run
     /// directory is active. It is what joins a record to its `steps/NNNN-…png`
     /// files, so the report never has to guess by position — which concurrent
@@ -161,6 +175,7 @@ struct TrajectoryRecord {
         diff: String?,
         screenshotPath: String?,
         verified: Bool? = nil,
+        deliveryConfirmed: Bool? = nil,
         step: Int? = nil,
         evidence: RunEvidence? = nil
     ) {
@@ -177,6 +192,7 @@ struct TrajectoryRecord {
         self.diff = diff
         self.screenshotPath = screenshotPath
         self.verified = verified
+        self.deliveryConfirmed = deliveryConfirmed
         self.step = step
         self.evidence = evidence
     }
@@ -196,6 +212,9 @@ struct TrajectoryRecord {
         if let preDigest { fields.append("\"preDigest\":\(JSONText.string(preDigest))") }
         if let postDigest { fields.append("\"postDigest\":\(JSONText.string(postDigest))") }
         if let verified { fields.append("\"verified\":\(verified ? "true" : "false")") }
+        if let deliveryConfirmed {
+            fields.append("\"deliveryConfirmed\":\(deliveryConfirmed ? "true" : "false")")
+        }
         if let diff { fields.append("\"diff\":\(JSONText.string(diff))") }
         if let screenshotPath { fields.append("\"screenshotPath\":\(JSONText.string(screenshotPath))") }
         if let step { fields.append("\"step\":\(step)") }
@@ -262,6 +281,12 @@ public extension ActOutcome {
             // No `diff`: none was taken, and the stdout notice must never be
             // recorded as if it were one. `verified: false` carries the fact.
             return TrajectoryOutcomeInfo(ok: true, exit: 0, errorClass: nil, verified: false)
+        case .deliveredUnconfirmed:
+            // Also no `diff`, and BOTH fields: nothing was verified (no walk was
+            // taken) and, the stronger fact, delivery itself is unestablished.
+            return TrajectoryOutcomeInfo(
+                ok: true, exit: 0, errorClass: nil, verified: false, deliveryConfirmed: false
+            )
         case let .failed(_, code):
             return TrajectoryOutcomeInfo(ok: false, exit: code.rawValue, errorClass: code.trajectoryErrorClass)
         }
@@ -338,18 +363,26 @@ public extension ToolResult {
     /// say whether the action was verified. It suppresses the `diff`, because the
     /// payload is the "nothing was verified" notice rather than a diff, and marks
     /// the record with the same dedicated field the CLI writes.
+    ///
+    /// An UNCONFIRMED delivery comes from the result itself (`deliveryConfirmed`),
+    /// not the request: no client asks for it. It implies the unverified treatment —
+    /// no walk was taken, so the payload is a notice and not a diff — and adds the
+    /// stronger field on top.
     func trajectoryInfo(kind: TrajectoryKind, unverified: Bool = false) -> TrajectoryOutcomeInfo {
         let ok = !isError
         let text: String? = payloads.compactMap {
             if case let .text(value) = $0 { return value }
             return nil
         }.first
+        let unconfirmed = deliveryConfirmed == false
         var diff: String?
         var screenshotPath: String?
         var verified: Bool?
+        var confirmed: Bool?
         if ok {
-            if kind == .action { diff = unverified ? nil : text }
-            if kind == .action, unverified { verified = false }
+            if kind == .action { diff = (unverified || unconfirmed) ? nil : text }
+            if kind == .action, unverified || unconfirmed { verified = false }
+            if kind == .action, unconfirmed { confirmed = false }
             if kind == .screenshot { screenshotPath = TrajectoryRecord.screenshotPath(fromMessage: text) }
         }
         return TrajectoryOutcomeInfo(
@@ -358,7 +391,8 @@ public extension ToolResult {
             errorClass: ok ? nil : "error",
             diff: diff,
             screenshotPath: screenshotPath,
-            verified: verified
+            verified: verified,
+            deliveryConfirmed: confirmed
         )
     }
 }

@@ -24,6 +24,12 @@ private final class SynthesisRecorder {
         steps.append(.posted)
         posted.append(event)
     }
+
+    /// Stands in for the window server's per-type delivery counter: an event is
+    /// "delivered" the moment this fake poster has recorded it.
+    func delivered(_ type: CGEventType) -> UInt32 {
+        UInt32(posted.filter { $0.type == type }.count)
+    }
 }
 
 private struct RecordingActivator: Activator {
@@ -41,6 +47,14 @@ private struct StubSecureInput: SecureInputState {
     var isSecureInputActive: Bool { active }
 }
 
+/// The delivery counter the flush polls, answered from what the recording poster
+/// has seen. It makes delivery INSTANT, so these synthesis tests exercise the real
+/// post-then-flush path while touching neither the window server nor the clock.
+private struct RecordedDeliveryCounter: EventDeliveryCounter {
+    let recorder: SynthesisRecorder
+    func count(of type: CGEventType) -> UInt32 { recorder.delivered(type) }
+}
+
 private let testPID: pid_t = 4242
 
 private func makeSynthesizer(
@@ -53,7 +67,12 @@ private func makeSynthesizer(
         activator: RecordingActivator(recorder: recorder),
         secureInput: StubSecureInput(active: secureInputActive),
         poster: RecordingPoster(recorder: recorder),
-        source: nil
+        source: nil,
+        flush: InputDeliveryFlush(
+            counter: RecordedDeliveryCounter(recorder: recorder),
+            now: { 0 },
+            sleep: { _ in Issue.record("an already-delivered burst must confirm without waiting") }
+        )
     )
     return (synthesizer, recorder)
 }

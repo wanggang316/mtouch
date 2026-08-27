@@ -20,11 +20,13 @@ public enum KeyboardAction: Sendable {
 /// immediately after an asynchronous activation could leak keystrokes into the
 /// invoking terminal (VAL-ACT-019). Delivery itself still flows through
 /// `InputSynthesizer`, the single synthesis chokepoint that owns the
-/// secure-input refusal and activate-before-post invariants.
+/// secure-input refusal, activate-before-post, and post-then-flush invariants.
 public enum LiveKeyboardDelivery {
     /// Bring `pid` frontmost, wait (bounded) until the switch takes effect, then
-    /// synthesize the keystrokes. Rethrows `SecureInputActive` (mapped to exit 5
-    /// by the caller) with zero events delivered.
+    /// synthesize the keystrokes and wait for the window server to report them
+    /// delivered. Rethrows `SecureInputActive` (mapped to exit 5 by the caller)
+    /// with zero events delivered, and throws `DeliveryUnconfirmed` when the
+    /// events went out but the flush could not establish that they arrived.
     public static func deliver(pid: pid_t, action: KeyboardAction) throws {
         // Refuse up front when secure input is active, BEFORE stealing focus:
         // activating the target would pull focus away from the secure-input
@@ -43,11 +45,16 @@ public enum LiveKeyboardDelivery {
         // chokepoint every caller relies on, rather than splitting the activate
         // invariant across two seams.
         let synthesizer = InputSynthesizer(targetPID: pid, secureInput: secureInput)
+        let confirmation: DeliveryConfirmation
         switch action {
         case let .type(text):
-            try synthesizer.type(text)
+            confirmation = try synthesizer.type(text)
         case let .key(combo):
-            try synthesizer.key(combo)
+            confirmation = try synthesizer.key(combo)
         }
+        // The events are out, but the window server never acknowledged them within
+        // the budget. Surfacing that as an error is what stops the caller reporting
+        // a delivery it cannot stand behind.
+        if confirmation == .unconfirmed { throw DeliveryUnconfirmed() }
     }
 }

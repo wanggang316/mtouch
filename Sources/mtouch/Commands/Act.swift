@@ -79,9 +79,14 @@ struct RefActionArguments: ParsableArguments {
 /// `.deliveredUnverified` prints its notice exactly where a diff would go and
 /// exits 0: the input WAS delivered, so the command succeeded — what it cannot
 /// claim is that anything was verified, and the payload says so.
+///
+/// `.deliveredUnconfirmed` prints its own, stronger notice in the same place and
+/// also exits 0. The events went out, so a non-zero exit would invite a retry that
+/// delivers them a second time; the distinguishing evidence is the payload (and the
+/// trajectory's `deliveryConfirmed` field), not the exit code.
 func report(_ outcome: ActOutcome) throws {
     switch outcome {
-    case let .acted(output), let .deliveredUnverified(output):
+    case let .acted(output), let .deliveredUnverified(output), let .deliveredUnconfirmed(output):
         print(output)
     case let .failed(stderr, code):
         FileHandle.standardError.write(Data((stderr + "\n").utf8))

@@ -86,10 +86,17 @@ public enum ToolPayload: Equatable, Sendable {
 public struct ToolResult: Equatable, Sendable {
     public let payloads: [ToolPayload]
     public let isError: Bool
+    /// `false` when the tool POSTED input whose arrival could not be confirmed
+    /// (see `InputDeliveryFlush`). nil — the overwhelmingly common case — means the
+    /// question does not arise: the tool delivered nothing, or delivery was
+    /// confirmed. A field rather than a payload convention, because a recorder must
+    /// not have to pattern-match prose to learn it.
+    public let deliveryConfirmed: Bool?
 
-    public init(payloads: [ToolPayload], isError: Bool) {
+    public init(payloads: [ToolPayload], isError: Bool, deliveryConfirmed: Bool? = nil) {
         self.payloads = payloads
         self.isError = isError
+        self.deliveryConfirmed = deliveryConfirmed
     }
 
     /// A single-text result (the common case).
@@ -377,10 +384,18 @@ public enum MCPToolDispatch {
     /// The unverified case carries the SAME rendered notice the CLI prints, so the
     /// two surfaces stay byte-identical; the record — not the payload — is what
     /// marks it unverified (see `dispatchRecorded`).
+    ///
+    /// An UNCONFIRMED delivery cannot be read off the request the way `noVerify`
+    /// can — the client did not ask for it, the window server caused it — so the
+    /// result carries the fact on `deliveryConfirmed` for the recorder to pick up.
     private static func fromAct(_ outcome: ActOutcome) -> ToolResult {
         switch outcome {
-        case let .acted(output), let .deliveredUnverified(output): return .text(output)
-        case let .failed(stderr, _): return .text(stderr, isError: true)
+        case let .acted(output), let .deliveredUnverified(output):
+            return .text(output)
+        case let .deliveredUnconfirmed(output):
+            return ToolResult(payloads: [.text(output)], isError: false, deliveryConfirmed: false)
+        case let .failed(stderr, _):
+            return .text(stderr, isError: true)
         }
     }
 

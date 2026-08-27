@@ -38,12 +38,15 @@ public enum PointerAction: Equatable, Sendable {
 /// `LiveKeyboardDelivery`: bring the target frontmost (bounded) so the gesture
 /// lands in it rather than the invoking terminal, then synthesize through
 /// `InputSynthesizer`, the single synthesis chokepoint that owns the
-/// activate-before-post invariant.
+/// activate-before-post and post-then-flush invariants.
 public enum LivePointerDelivery {
     /// Bring `pid` frontmost, wait (bounded) until the switch takes effect, then
-    /// synthesize the gesture. Mouse synthesis is not gated by secure input (that
-    /// is a keyboard-only concern), so this never refuses.
-    public static func deliver(pid: pid_t, action: PointerAction) {
+    /// synthesize the gesture and wait for the window server to report it
+    /// delivered. Mouse synthesis is not gated by secure input (that is a
+    /// keyboard-only concern), so this never refuses — but it does throw
+    /// `DeliveryUnconfirmed` when the events went out and the flush could not
+    /// establish that they arrived.
+    public static func deliver(pid: pid_t, action: PointerAction) throws {
         FrontmostActivation.bringToFront(pid: pid)
 
         // `InputSynthesizer` also cooperatively activates the target per event. That
@@ -53,17 +56,22 @@ public enum LivePointerDelivery {
         // chokepoint every caller relies on, rather than splitting the activate
         // invariant across two seams.
         let synthesizer = InputSynthesizer(targetPID: pid)
+        let confirmation: DeliveryConfirmation
         switch action {
         case let .click(point):
-            synthesizer.click(at: point)
+            confirmation = synthesizer.click(at: point)
         case let .rightClick(point):
-            synthesizer.rightClick(at: point)
+            confirmation = synthesizer.rightClick(at: point)
         case let .doubleClick(point):
-            synthesizer.doubleClick(at: point)
+            confirmation = synthesizer.doubleClick(at: point)
         case let .drag(from, to):
-            synthesizer.drag(from: from, to: to)
+            confirmation = synthesizer.drag(from: from, to: to)
         case let .scroll(point, dy):
-            synthesizer.scroll(at: point, dy: dy)
+            confirmation = synthesizer.scroll(at: point, dy: dy)
         }
+        // The events are out, but the window server never acknowledged them within
+        // the budget. Surfacing that as an error is what stops the caller reporting
+        // a gesture it cannot stand behind.
+        if confirmation == .unconfirmed { throw DeliveryUnconfirmed() }
     }
 }

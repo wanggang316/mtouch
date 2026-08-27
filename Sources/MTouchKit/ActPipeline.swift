@@ -19,6 +19,17 @@ public enum ActOutcome: Equatable, Sendable {
     /// the MCP payload, the trajectory record — can silently treat an unverified
     /// delivery as a verified action.
     case deliveredUnverified(String)
+    /// The synthesized events were POSTED, but the bounded flush could not confirm
+    /// the window server processed them (see `InputDeliveryFlush`). The payload is
+    /// the rendered "could not be confirmed" notice, written to stdout where a diff
+    /// would go; exit 0, because the input did go out and re-sending it blindly
+    /// would risk delivering it twice.
+    ///
+    /// Reported by the VERIFIED verbs too: once delivery is in doubt there is
+    /// nothing to verify against, so the post-action walk is skipped rather than
+    /// dressed up as the effect of an action that may never have happened. A case
+    /// of its own so it can never render as the weaker `.deliveredUnverified`.
+    case deliveredUnconfirmed(String)
     /// A stderr diagnostic paired with its non-zero exit code.
     case failed(stderr: String, code: MTouchExitCode)
 }
@@ -383,12 +394,17 @@ public enum ActPipeline {
 
         // Deliver the keystrokes. Secure input active -> exit 5, ZERO events, and a
         // payload-free diagnostic (both from `SecureInputActive`). The seam also
-        // owns the activate-before-post invariant, so both paths below activate.
+        // owns the activate-before-post and post-then-flush invariants, so both
+        // paths below activate AND wait for delivery.
         func deliverKeystrokes() -> ActOutcome? {
             do {
                 try deliver(pid, action)
             } catch let error as SecureInputActive {
                 return .failed(stderr: error.diagnostic, code: error.exitCode)
+            } catch is DeliveryUnconfirmed {
+                // Posted, but unacknowledged: short-circuit with the stronger
+                // notice instead of walking a tree we cannot attribute.
+                return .deliveredUnconfirmed(UnconfirmedDelivery.rendered(json: json))
             } catch {
                 return .failed(stderr: "mtouch: failed to deliver keystrokes: \(error)", code: .runtimeFailure)
             }
@@ -397,9 +413,11 @@ public enum ActPipeline {
 
         // Unverified delivery: no baseline, no settle, no session write — the
         // session keeps describing the last tree that was actually READ, so a later
-        // ref still means what it meant. Only the notice is reported.
+        // ref still means what it meant. Only the notice is reported. The delivery
+        // is still FLUSHED: skipping verification is not licence to skip waiting for
+        // the input to land, which is the whole reason this mode was unreliable.
         if noVerify {
-            if let failure = deliverKeystrokes() { return failure }
+            if let terminal = deliverKeystrokes() { return terminal }
             return .deliveredUnverified(UnverifiedDelivery.rendered(json: json))
         }
 
@@ -446,7 +464,7 @@ public enum ActPipeline {
         onScreen: (ScreenPoint) -> Bool = { ScreenBounds.isOnScreen($0) },
         rewalk: (pid_t) -> WalkResult? = { pid in BoundedWalk.run { AXTreeWalker.walk(pid: pid) } },
         deliver: (pid_t, PointerAction) throws -> Void = { pid, action in
-            LivePointerDelivery.deliver(pid: pid, action: action)
+            try LivePointerDelivery.deliver(pid: pid, action: action)
         },
         persist: (Snapshot, String, pid_t, String) throws -> Void = { snapshot, app, pid, path in
             try SessionStore.save(snapshot, app: app, pid: pid, to: path)
@@ -482,10 +500,15 @@ public enum ActPipeline {
         }
 
         // Deliver the gesture. Any delivery failure is a runtime error (exit 1). The
-        // seam owns the activate-before-post invariant, so both paths below activate.
+        // seam owns the activate-before-post and post-then-flush invariants, so both
+        // paths below activate AND wait for delivery.
         func deliverGesture() -> ActOutcome? {
             do {
                 try deliver(pid, action)
+            } catch is DeliveryUnconfirmed {
+                // Posted, but unacknowledged: short-circuit with the stronger
+                // notice instead of walking a tree we cannot attribute.
+                return .deliveredUnconfirmed(UnconfirmedDelivery.rendered(json: json))
             } catch {
                 return .failed(stderr: "mtouch: failed to deliver pointer event: \(error)", code: .runtimeFailure)
             }
@@ -494,9 +517,11 @@ public enum ActPipeline {
 
         // Unverified delivery: no baseline, no settle, no session write — the
         // session keeps describing the last tree that was actually READ, so a later
-        // ref still means what it meant. Only the notice is reported.
+        // ref still means what it meant. Only the notice is reported. The delivery
+        // is still FLUSHED: skipping verification is not licence to skip waiting for
+        // the input to land, which is the whole reason this mode was unreliable.
         if noVerify {
-            if let failure = deliverGesture() { return failure }
+            if let terminal = deliverGesture() { return terminal }
             return .deliveredUnverified(UnverifiedDelivery.rendered(json: json))
         }
 
@@ -523,11 +548,17 @@ public enum ActPipeline {
     /// The tail every `act` verb shares once its target is resolved and its
     /// pre-action baseline (`preSnapshot`) is taken: perform the verb-specific
     /// input, bounded-settle into a diff, persist the new session BEFORE rendering,
-    /// then render. `act` runs the input and returns a terminal failure outcome to
-    /// short-circuit (an AX refusal, secure input, a delivery error), or nil on
-    /// success — so each verb keeps its own error mapping while the settle/persist/
-    /// render invariants (persist-before-render; an unwritable path is exit 1) live
-    /// in exactly one place.
+    /// then render. `act` runs the input and returns a TERMINAL outcome to
+    /// short-circuit — an AX refusal, secure input, a delivery error, or a delivery
+    /// that was posted but could not be confirmed — or nil on success, so each verb
+    /// keeps its own outcome mapping while the settle/persist/render invariants
+    /// (persist-before-render; an unwritable path is exit 1) live in exactly one
+    /// place.
+    ///
+    /// The settle below is a re-walk loop, never the wait for the input to arrive:
+    /// by the time `act` returns nil the delivery seam has already flushed, so the
+    /// walk observes a UI that has genuinely received the input rather than
+    /// doubling as an accidental timer for it.
     ///
     /// Internal (not private) so the menu-path verb, which lives in its own file,
     /// composes the SAME back half instead of restating these invariants.
@@ -543,7 +574,7 @@ public enum ActPipeline {
         sleep: (TimeInterval) -> Void,
         act: () -> ActOutcome?
     ) -> ActOutcome {
-        if let failure = act() { return failure }
+        if let terminal = act() { return terminal }
 
         // Bounded re-walk until the change appears, diff against the pre tree,
         // persist the new session, then render.

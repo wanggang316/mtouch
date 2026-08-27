@@ -136,6 +136,7 @@ public enum TrajectoryRecorder {
             diff: kind == .action ? info.diff : nil,
             screenshotPath: kind == .screenshot ? info.screenshotPath : nil,
             verified: kind == .action ? info.verified : nil,
+            deliveryConfirmed: kind == .action ? info.deliveryConfirmed : nil,
             step: step?.index,
             evidence: evidence.isEmpty ? nil : evidence
         )
