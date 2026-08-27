@@ -95,15 +95,20 @@ public enum SnapshotPipeline {
             return .failed(stderr: saveDiagnostic(error, path: path), code: .runtimeFailure)
         }
 
-        let output = json ? renderJSONOutput(snapshot, note: note) : renderTextOutput(snapshot, note: note)
+        let output = json
+            ? renderJSONOutput(snapshot, note: note, cyclesCut: result.cyclesCut)
+            : renderTextOutput(snapshot, note: note, cyclesCut: result.cyclesCut)
         return .rendered(output)
     }
 
     // MARK: - Rendering (note-aware wrappers over the shared renderers)
 
-    /// Text output, prefixing a `note:` line when the fallback engaged.
-    static func renderTextOutput(_ snapshot: Snapshot, note: String?) -> String {
-        let tree = renderText(snapshot)
+    /// Text output, prefixing a `note:` line when the fallback engaged and
+    /// appending the cycle marker when the walk had to cut one. Both default to
+    /// absent, so a normal app renders byte-for-byte the bare tree.
+    static func renderTextOutput(_ snapshot: Snapshot, note: String?, cyclesCut: Int = 0) -> String {
+        var tree = renderText(snapshot)
+        if cyclesCut > 0 { tree += "\n" + SnapshotText.cycleMarker(cut: cyclesCut) }
         guard let note else { return tree }
         return "note: \(note)\n\(tree)"
     }
@@ -111,10 +116,13 @@ public enum SnapshotPipeline {
     /// JSON output. The top level is a stable object `{ "nodes": [...] }` with an
     /// optional `"note"` field — an object (not a bare array) so a fallback note
     /// has somewhere to live while `nodes` carries the full filtered tree
-    /// (geometry and scroll positions included).
-    static func renderJSONOutput(_ snapshot: Snapshot, note: String?) -> String {
+    /// (geometry and scroll positions included). A cut cycle rides the same field
+    /// (JSON has no line-marker slot), carrying the same sentence the text marker
+    /// states; both notes appear when both apply.
+    static func renderJSONOutput(_ snapshot: Snapshot, note: String?, cyclesCut: Int = 0) -> String {
         var fields = ["\"nodes\":\(renderJSON(snapshot))"]
-        if let note { fields.append("\"note\":\(JSONText.string(note))") }
+        let notes = [note, cyclesCut > 0 ? SnapshotText.cycleReport(cut: cyclesCut) : nil].compactMap { $0 }
+        if !notes.isEmpty { fields.append("\"note\":\(JSONText.string(notes.joined(separator: "; ")))") }
         return "{" + fields.joined(separator: ",") + "}"
     }
 

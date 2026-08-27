@@ -85,42 +85,72 @@ public struct LiveElementTree: @unchecked Sendable {
     }
 
     /// Accumulates the two path-keyed indices while descending, mirroring
-    /// `AXTreeWalker.buildNode` (same depth cap, same `descendableChildren`).
+    /// `AXTreeWalker.buildNode` (same depth cap, same `descendableChildren`, same
+    /// per-path cycle cut).
     private struct Builder<Provider: AXTreeProvider> where Provider.Element == AXUIElement {
         let provider: Provider
         var elementsByPath: [[Int]: AXUIElement] = [:]
         var attributesByPath: [[Int]: AXAttributes] = [:]
         var windowIDsByPath: [[Int]: CGWindowID] = [:]
+        /// The same per-path visited set the snapshot walk uses. It must cut in
+        /// the SAME places, or a ref's structural path would not address the same
+        /// element here as it did in the snapshot.
+        var cycle = AXCycleGuard()
 
         mutating func build() -> [AXNode] {
             elementsByPath.removeAll()
             attributesByPath.removeAll()
             windowIDsByPath.removeAll()
-            return provider.roots().enumerated().map { index, element in
+            var nodes: [AXNode] = []
+            for element in provider.roots() {
                 // Resolve the owning-window id ONCE per root (a window's own
                 // element) and propagate it down; a non-window root (the menu bar)
                 // reports nil, leaving its subtree without an id.
-                node(element, path: [index], depth: 0, windowID: AXSupport.windowID(of: element))
+                guard let root = node(
+                    element, path: [nodes.count], depth: 0, windowID: AXSupport.windowID(of: element)
+                ) else { continue }
+                nodes.append(root)
             }
+            return nodes
         }
 
+        /// The node for `element`, or nil when it is a cycle back onto the current
+        /// path — the SAME verdict `AXTreeWalker.buildNode` reaches, so a cut child
+        /// occupies no path here either and every surviving sibling keeps the index
+        /// the snapshot's refs were assigned from.
         private mutating func node(
             _ element: AXUIElement, path: [Int], depth: Int, windowID: CGWindowID?
-        ) -> AXNode {
+        ) -> AXNode? {
             let attributes = provider.attributes(of: element)
+            guard depth < AXTreeWalker.maxDepth else {
+                record(element, attributes: attributes, path: path, windowID: windowID)
+                return AXNode(attributes: attributes, children: [])
+            }
+            let identity = provider.identity(of: element)
+            guard cycle.enter(identity) else { return nil }
+            defer { cycle.leave(identity) }
+
+            record(element, attributes: attributes, path: path, windowID: windowID)
+            var children: [AXNode] = []
+            for child in AXTreeWalker.descendableChildren(
+                provider: provider, ownerRole: attributes.role, of: element
+            ) {
+                guard let childNode = node(
+                    child, path: path + [children.count], depth: depth + 1, windowID: windowID
+                ) else { continue }
+                children.append(childNode)
+            }
+            return AXNode(attributes: attributes, children: children)
+        }
+
+        /// Indexes one EMITTED node's handle, attributes, and owning-window id under
+        /// its structural path.
+        private mutating func record(
+            _ element: AXUIElement, attributes: AXAttributes, path: [Int], windowID: CGWindowID?
+        ) {
             attributesByPath[path] = attributes
             elementsByPath[path] = element
             if let windowID { windowIDsByPath[path] = windowID }
-            guard depth < AXTreeWalker.maxDepth else {
-                return AXNode(attributes: attributes, children: [])
-            }
-            let children = AXTreeWalker
-                .descendableChildren(provider: provider, ownerRole: attributes.role, of: element)
-                .enumerated()
-                .map { childIndex, child in
-                    node(child, path: path + [childIndex], depth: depth + 1, windowID: windowID)
-                }
-            return AXNode(attributes: attributes, children: children)
         }
     }
 }

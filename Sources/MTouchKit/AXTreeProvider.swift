@@ -67,12 +67,56 @@ public protocol AXTreeProvider {
     /// non-live/test providers need not implement it; their refs simply carry no
     /// window id and relocate by ancestor/position alone.
     func windowID(of element: Element) -> CGWindowID?
+
+    /// The IDENTITY of `element` for cycle detection, or nil when this provider
+    /// cannot vouch for identity (a value-typed fixture tree has none). The walker
+    /// refuses to descend into an element whose identity is already on the current
+    /// root-to-node path; a provider that reports nil is guarded by the depth cap
+    /// alone, exactly as before this seam existed.
+    func identity(of element: Element) -> AXElementIdentity?
 }
 
 public extension AXTreeProvider {
     /// Default: no window id. Non-live providers (and roots that are not windows)
     /// contribute none, leaving `RefEntry.ownerWindowID` nil for those refs.
     func windowID(of element: Element) -> CGWindowID? { nil }
+
+    /// Default: no identity. A provider over value-typed fixture nodes cannot
+    /// express a cycle in the first place, so reporting nil is honest rather than
+    /// inventing an identity out of role/title (which repeat legitimately).
+    func identity(of element: Element) -> AXElementIdentity? { nil }
+}
+
+public extension AXTreeProvider where Element == AXUIElement {
+    /// Every provider over LIVE AX handles gets CoreFoundation identity for free,
+    /// so `LiveTreeProvider` and any handle-based double are cycle-guarded by the
+    /// same rule.
+    func identity(of element: AXUIElement) -> AXElementIdentity? { AXElementIdentity(element) }
+}
+
+/// The identity of ONE accessibility element, as CoreFoundation defines it.
+///
+/// `AXUIElement` is a CF type whose Swift references are NOT pointer-unique: two
+/// separately obtained handles for the SAME element are distinct objects (`===`
+/// false) yet `CFEqual` true and share a `CFHash`. Cycle detection is a question
+/// of identity — "have I already entered THIS element?" — so the visited set is
+/// keyed by exactly that CF notion, never by role/title (which repeat all over a
+/// legitimate tree and would cut real content).
+public struct AXElementIdentity: Hashable {
+    private let object: CFTypeRef
+
+    public init(_ object: CFTypeRef) { self.object = object }
+
+    public static func == (lhs: AXElementIdentity, rhs: AXElementIdentity) -> Bool {
+        CFEqual(lhs.object, rhs.object)
+    }
+
+    /// `CFHash` is the hash that agrees with `CFEqual`; Swift's default
+    /// object hashing (pointer-based) would NOT, and equal elements would land in
+    /// different buckets.
+    public func hash(into hasher: inout Hasher) {
+        hasher.combine(CFHash(object))
+    }
 }
 
 /// Renders raw AX attribute values that arrive as `CFTypeRef` into the

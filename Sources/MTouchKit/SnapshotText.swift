@@ -74,6 +74,20 @@ public enum SnapshotText {
             + "(budget \(maxNodes) nodes; all refs kept)"
     }
 
+    /// The trailing marker for a walk that had to CUT a cycle, in the same
+    /// grammar as `truncationMarker`: an agent must be able to tell "this app's
+    /// accessibility tree points back at itself, so a subtree is missing" from
+    /// "this app exposes nothing". Appended by `SnapshotPipeline` (the cut is a
+    /// fact about the WALK, so it is not derivable from the rendered tree).
+    static func cycleMarker(cut: Int) -> String { "... " + cycleReport(cut: cut) }
+
+    /// The bare fact the marker states, so the JSON surface — which has no
+    /// line-marker slot — can carry the SAME sentence in its `note` field.
+    static func cycleReport(cut: Int) -> String {
+        "cycle detected: \(cut) element(s) reappeared inside their own subtree and were "
+            + "not re-entered (the repeated occurrence and everything under it is omitted)"
+    }
+
     /// Escapes the characters that would otherwise break the one-line invariant:
     /// backslash (so the escaping is reversible), newline, carriage return, tab.
     static func escapeInline(_ value: String) -> String {
