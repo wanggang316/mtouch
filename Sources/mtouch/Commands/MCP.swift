@@ -33,7 +33,9 @@ struct MCP: ParsableCommand {
 /// thread (via `runOnMainThread`) for its pipeline work, which the run loop then
 /// services.
 enum MCPServer {
-    static let version = "0.1.0"
+    /// Single source of truth, shared with the run bundle's `run.json`: two
+    /// hand-synced copies WILL drift the first time one is bumped alone.
+    static let version = MTouchVersion.current
 
     /// Tracks whether the client has completed the `initialize` handshake, so a
     /// `tools/call` that arrives BEFORE it is rejected with a JSON-RPC error (no
