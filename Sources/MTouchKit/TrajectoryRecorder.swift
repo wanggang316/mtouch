@@ -45,13 +45,21 @@ public enum TrajectoryRecorder {
 
     /// Run `operation` and, when recording is on, append one record for it.
     ///
-    /// - Recording off (`MTOUCH_TRAJECTORY` unset/empty): returns `operation()`
-    ///   verbatim, touching no files and never throwing.
-    /// - Recording on but the path is unusable (a directory, or an
-    ///   uncreatable/unwritable parent): THROWS `TrajectoryError` BEFORE running
-    ///   `operation`, so the caller aborts (exit 1) instead of a silent run.
-    /// - Recording on and usable: reads the pre-digest (for `.action`), runs
-    ///   `operation`, reads the post-digest, and appends the shaped line.
+    /// - Recording off (no `MTOUCH_TRAJECTORY` and no `MTOUCH_RUN_DIR`): returns
+    ///   `operation()` verbatim, touching no files and never throwing.
+    /// - Recording on but the trajectory path or the run directory is unusable:
+    ///   THROWS (`TrajectoryError` / `RunBundleError`) BEFORE running `operation`,
+    ///   so the caller aborts (exit 1) instead of a silent unrecorded run.
+    /// - Recording on and usable: claims a step in the run bundle (if any), takes
+    ///   the opt-in "before" capture, reads the pre-digest (for `.action`), runs
+    ///   `operation`, takes the "after" capture, reads the post-digest, and
+    ///   appends the shaped line.
+    ///
+    /// `MTOUCH_RUN_DIR` alone is enough to turn recording on: the bundle's own
+    /// `trajectory.jsonl` becomes the stream. An explicitly set `MTOUCH_TRAJECTORY`
+    /// still WINS over it — explicit beats implicit — in which case the bundle
+    /// still numbers the steps and collects the screenshots, and the records
+    /// naming them land in the operator's chosen file.
     public static func record<Outcome>(
         command: String,
         args: TrajectoryArgs,
@@ -60,9 +68,14 @@ public enum TrajectoryRecorder {
         operation: () -> Outcome,
         describe: (Outcome) -> TrajectoryOutcomeInfo,
         now: () -> Double = { ProcessInfo.processInfo.systemUptime },
-        wallNow: () -> Double = { Date().timeIntervalSince1970 }
+        wallNow: () -> Double = { Date().timeIntervalSince1970 },
+        capture: RunCapturing = LiveRunCapture()
     ) throws -> Outcome {
-        guard let path = environment[MTouchEnvironment.trajectoryKey], !path.isEmpty else {
+        // Prepare the bundle BEFORE anything else: an unusable run directory must
+        // abort the command rather than let it run undocumented.
+        let run = try RunBundle.resolve(environment: environment, now: now, wallNow: wallNow)
+
+        guard let path = trajectoryPath(environment: environment, run: run) else {
             // Recording off: pure pass-through, zero file work, zero throws.
             return operation()
         }
@@ -73,6 +86,15 @@ public enum TrajectoryRecorder {
         let fd = try openForAppend(path)
         defer { close(fd) }
 
+        // Claim the step ordinal under the bundle's lock, also before the
+        // operation, so concurrent commands can never share a number.
+        let step = try run?.allocateStep(command: command)
+        let capturing = run != nil && RunBundle.captureEnabled(environment: environment)
+        var evidence = RunEvidence()
+        if capturing, let run, let step, let slot = preSlot(for: kind) {
+            collect(into: &evidence, run: run, step: step, slot: slot, capture: capture)
+        }
+
         let sessionPath = SessionStore.sessionFilePath(environment: environment)
         let preDigest = (kind == .action) ? sessionDigest(sessionPath) : nil
         let timestamp = now()
@@ -80,6 +102,10 @@ public enum TrajectoryRecorder {
 
         let outcome = operation()
         let info = describe(outcome)
+
+        if capturing, let run, let step, let slot = postSlot(for: kind) {
+            collect(into: &evidence, run: run, step: step, slot: slot, capture: capture)
+        }
 
         let postDigest = (kind == .action) ? sessionDigest(sessionPath) : nil
         // A snapshot's digest is the tree it just persisted; only meaningful when
@@ -101,10 +127,63 @@ public enum TrajectoryRecorder {
             postDigest: postDigest,
             digest: snapshotDigest,
             diff: kind == .action ? info.diff : nil,
-            screenshotPath: kind == .screenshot ? info.screenshotPath : nil
+            screenshotPath: kind == .screenshot ? info.screenshotPath : nil,
+            step: step?.index,
+            evidence: evidence.isEmpty ? nil : evidence
         )
         try appendLine(record.jsonLine(), to: fd, path: path)
         return outcome
+    }
+
+    // MARK: - Run bundle wiring
+
+    /// The stream to append to: an explicitly set `MTOUCH_TRAJECTORY` first, then
+    /// the run bundle's own `trajectory.jsonl`, then nil (recording off).
+    static func trajectoryPath(environment: [String: String], run: RunBundle?) -> String? {
+        if let explicit = environment[MTouchEnvironment.trajectoryKey], !explicit.isEmpty {
+            return explicit
+        }
+        return run?.trajectoryPath
+    }
+
+    /// The capture taken BEFORE the operation: only a MUTATING command has a
+    /// "before" worth keeping, since only it changes what is on screen.
+    private static func preSlot(for kind: TrajectoryKind) -> RunStepSlot? {
+        kind == .action ? .before : nil
+    }
+
+    /// The capture taken AFTER the operation. A mutating command closes its
+    /// bracket with `.after`; a read-only command has nothing to bracket, so it
+    /// takes ONE capture — `.state`, the screen as the command left it, which for
+    /// a `wait` is the state that finally satisfied the condition. A `screenshot`
+    /// command IS its own evidence — its record already names the PNG it wrote —
+    /// so it takes none.
+    private static func postSlot(for kind: TrajectoryKind) -> RunStepSlot? {
+        switch kind {
+        case .action: return .after
+        case .snapshot, .read: return .state
+        case .screenshot: return nil
+        }
+    }
+
+    /// Capture one slot and fold the result — a relative path, or the reason there
+    /// is none — into `evidence`. Never throws and never alters the operation.
+    private static func collect(
+        into evidence: inout RunEvidence,
+        run: RunBundle,
+        step: RunStep,
+        slot: RunStepSlot,
+        capture: RunCapturing
+    ) {
+        switch capture.capturePNG() {
+        case let .success(data):
+            switch run.writeStepImage(data, step: step, slot: slot) {
+            case let .success(relative): evidence[slot] = relative
+            case let .failure(failure): evidence.note(failure: failure.diagnostic, slot: slot)
+            }
+        case let .failure(failure):
+            evidence.note(failure: failure.diagnostic, slot: slot)
+        }
     }
 
     // MARK: - File handling
@@ -144,45 +223,27 @@ public enum TrajectoryRecorder {
     }
 
     /// Append the record's complete `<json>\n` buffer to the O_APPEND fd both
-    /// ATOMICALLY and COMPLETELY, so the file is always fully `jq -c .`-parseable:
+    /// ATOMICALLY and COMPLETELY, so the file is always fully `jq -c .`-parseable.
     ///
-    ///   - An advisory exclusive lock (`flock(LOCK_EX)`) is held for the whole
-    ///     append and released in a `defer`. This serializes concurrent recorders,
-    ///     so a large record that needs more than one `write(2)` (a big `diff` can
-    ///     exceed the kernel's atomic-append size) cannot interleave with another
-    ///     writer and tear a line.
-    ///   - The `write(2)` is looped until the entire buffer is out, retrying on
-    ///     `EINTR` and advancing past a partial write, so a short/interrupted write
-    ///     completes rather than throwing or leaving a torn line.
+    /// Both halves of that guarantee come from `LockedFile`, which a run bundle's
+    /// step counter shares so the two multi-process writers cannot drift:
+    ///
+    ///   - An advisory exclusive lock is held for the whole append. This
+    ///     serializes concurrent recorders, so a large record that needs more than
+    ///     one `write(2)` (a big `diff` can exceed the kernel's atomic-append size)
+    ///     cannot interleave with another writer and tear a line.
+    ///   - The `write(2)` is looped until the entire buffer is out, so a
+    ///     short/interrupted write completes rather than leaving a torn line.
     ///
     /// A crash mid-session still leaves every completed line intact (at most a final
     /// truncated line). A genuinely unusable fd surfaces as `notWritable` (exit 1).
     private static func appendLine(_ line: String, to fd: Int32, path: String) throws {
-        // Serialize with any concurrent recorder before touching the file, so a
-        // multi-write large line stays contiguous. Retry the lock itself on EINTR.
-        while flock(fd, LOCK_EX) != 0 {
-            if errno == EINTR { continue }
-            throw TrajectoryError.notWritable(path: path, reason: String(cString: strerror(errno)))
-        }
-        defer { _ = flock(fd, LOCK_UN) }
-
-        let data = Data(line.utf8)
-        try data.withUnsafeBytes { buffer in
-            guard let base = buffer.baseAddress, buffer.count > 0 else { return }
-            let total = buffer.count
-            var offset = 0
-            while offset < total {
-                let written = write(fd, base + offset, total - offset)
-                if written < 0 {
-                    if errno == EINTR { continue }   // interrupted before any byte: retry
-                    throw TrajectoryError.notWritable(path: path, reason: String(cString: strerror(errno)))
-                }
-                if written == 0 {
-                    // No error yet no progress: refuse to spin forever.
-                    throw TrajectoryError.notWritable(path: path, reason: "write made no progress (\(offset)/\(total) bytes)")
-                }
-                offset += written                    // advance past a partial write
+        do {
+            try LockedFile.withExclusiveLock(fd) {
+                try LockedFile.writeAll(Data(line.utf8), to: fd)
             }
+        } catch let failure as FileIOFailure {
+            throw TrajectoryError.notWritable(path: path, reason: failure.reason)
         }
     }
 

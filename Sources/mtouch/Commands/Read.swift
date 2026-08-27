@@ -62,6 +62,8 @@ struct Read: ParsableCommand {
 
     @OptionGroup var appOptions: OptionalAppOptions
 
+    @OptionGroup var runOptions: RunOptions
+
     /// The addressing modes are mutually exclusive, and the app-scoped ones need
     /// `--app`; both rules are usage errors (exit 64) decided BEFORE any AX call.
     mutating func validate() throws {
@@ -85,6 +87,7 @@ struct Read: ParsableCommand {
                 "json": json ? .bool(true) : nil,
             ]),
             kind: .read,
+            run: runOptions,
             describe: { (outcome: ReadOutcome) in outcome.trajectoryInfo }
         ) {
             switch mode {

@@ -13,6 +13,8 @@ struct Snapshot: ParsableCommand {
     @Flag(help: "Emit machine-readable JSON output.")
     var json = false
 
+    @OptionGroup var runOptions: RunOptions
+
     mutating func run() throws {
         // The whole flow (preflight → resolve → walk → enrich → render → persist)
         // lives in `SnapshotPipeline` as a testable value; this command only
@@ -29,6 +31,7 @@ struct Snapshot: ParsableCommand {
                 "json": json ? .bool(true) : nil,
             ]),
             kind: .snapshot,
+            run: runOptions,
             describe: { (outcome: SnapshotOutcome) in outcome.trajectoryInfo }
         ) {
             // `--pid` rides the pipeline's existing resolution seam.

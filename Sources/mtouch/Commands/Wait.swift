@@ -74,6 +74,8 @@ struct Wait: ParsableCommand {
     @Option(help: ArgumentHelp("Polling interval (default 100ms).", valueName: "duration"))
     var interval: WaitDuration?
 
+    @OptionGroup var runOptions: RunOptions
+
     /// Default poll interval when `--interval` is omitted.
     static let defaultInterval = WaitDuration(seconds: 0.1)
 
@@ -108,6 +110,7 @@ struct Wait: ParsableCommand {
                 "interval": interval.map { .double($0.seconds) },
             ]),
             kind: .read,
+            run: runOptions,
             describe: { (outcome: WaitOutcome) in outcome.trajectoryInfo }
         ) {
             // `--pid` rides the pipeline's existing resolution seam.

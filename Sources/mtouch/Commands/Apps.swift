@@ -10,6 +10,8 @@ struct Apps: ParsableCommand {
     @Flag(help: "Emit machine-readable JSON output.")
     var json = false
 
+    @OptionGroup var runOptions: RunOptions
+
     mutating func run() throws {
         // Process enumeration via NSWorkspace is not TCC-gated: no preflight. apps
         // has no failure path, so its record is always a clean read.
@@ -18,6 +20,7 @@ struct Apps: ParsableCommand {
             command: "apps",
             args: TrajectoryArgs.build(["json": json ? .bool(true) : nil]),
             kind: .read,
+            run: runOptions,
             describe: { (_: Void) in TrajectoryOutcomeInfo(ok: true, exit: 0, errorClass: nil) }
         ) {
             let apps = RunningAppInfo.currentRegularApps()

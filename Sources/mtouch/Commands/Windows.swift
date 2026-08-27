@@ -13,6 +13,8 @@ struct Windows: ParsableCommand {
     @Flag(help: "Emit machine-readable JSON output.")
     var json = false
 
+    @OptionGroup var runOptions: RunOptions
+
     /// The observable outcome, kept as a value so the recorder observes both the
     /// success and the failure paths (a bare `exit()` in the middle would bypass
     /// recording). Mirrors the pipeline commands' outcome/side-effect split.
@@ -33,6 +35,7 @@ struct Windows: ParsableCommand {
                 "json": json ? .bool(true) : nil,
             ]),
             kind: .read,
+            run: runOptions,
             describe: { (outcome: Outcome) in
                 switch outcome {
                 case .listed:

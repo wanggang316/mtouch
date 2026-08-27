@@ -136,6 +136,10 @@ public enum MCPToolDispatch {
             )
         } catch let error as TrajectoryError {
             return .text(error.diagnostic, isError: true)
+        } catch let error as RunBundleError {
+            // An unusable run directory is surfaced with the SAME pinned wording the
+            // CLI prints, so both surfaces name the offending path identically.
+            return .text(error.diagnostic, isError: true)
         } catch {
             return .text("mtouch: trajectory recording failed: \(error)", isError: true)
         }

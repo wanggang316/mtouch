@@ -10,6 +10,8 @@ struct Doctor: ParsableCommand {
     @Flag(help: "Emit machine-readable JSON output.")
     var json = false
 
+    @OptionGroup var runOptions: RunOptions
+
     mutating func run() throws {
         let jsonOutput = json
         // Doctor always produces its report (a read); the exit code reflects
@@ -18,6 +20,7 @@ struct Doctor: ParsableCommand {
             command: "doctor",
             args: TrajectoryArgs.build(["json": json ? .bool(true) : nil]),
             kind: .read,
+            run: runOptions,
             describe: { (report: DoctorReport) in
                 let code = report.exitCode
                 return TrajectoryOutcomeInfo(

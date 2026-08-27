@@ -125,6 +125,46 @@ struct TrajectoryRecord {
     let digest: String?
     let diff: String?
     let screenshotPath: String?
+    /// The run bundle's step ordinal for this record; present only when a run
+    /// directory is active. It is what joins a record to its `steps/NNNN-…png`
+    /// files, so the report never has to guess by position — which concurrent
+    /// writers would break.
+    let step: Int?
+    /// The step images this record collected (and any capture failure). Absent
+    /// when captures are off, which is the default.
+    let evidence: RunEvidence?
+
+    init(
+        command: String,
+        timestamp: Double,
+        wallClock: Double,
+        args: TrajectoryArgs,
+        ok: Bool,
+        exit: Int32?,
+        errorClass: String?,
+        preDigest: String?,
+        postDigest: String?,
+        digest: String?,
+        diff: String?,
+        screenshotPath: String?,
+        step: Int? = nil,
+        evidence: RunEvidence? = nil
+    ) {
+        self.command = command
+        self.timestamp = timestamp
+        self.wallClock = wallClock
+        self.args = args
+        self.ok = ok
+        self.exit = exit
+        self.errorClass = errorClass
+        self.preDigest = preDigest
+        self.postDigest = postDigest
+        self.digest = digest
+        self.diff = diff
+        self.screenshotPath = screenshotPath
+        self.step = step
+        self.evidence = evidence
+    }
 
     /// The full `<json>\n` line. The trailing newline is part of the returned
     /// string so the whole record — line + terminator — is written in ONE atomic
@@ -142,6 +182,8 @@ struct TrajectoryRecord {
         if let postDigest { fields.append("\"postDigest\":\(JSONText.string(postDigest))") }
         if let diff { fields.append("\"diff\":\(JSONText.string(diff))") }
         if let screenshotPath { fields.append("\"screenshotPath\":\(JSONText.string(screenshotPath))") }
+        if let step { fields.append("\"step\":\(step)") }
+        if let evidence, !evidence.isEmpty { fields.append("\"evidence\":\(evidence.jsonObject())") }
         return "{" + fields.joined(separator: ",") + "}\n"
     }
 

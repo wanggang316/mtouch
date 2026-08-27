@@ -43,6 +43,8 @@ struct RefActionArguments: ParsableArguments {
     var json = false
 
     @OptionGroup var appOptions: OptionalAppOptions
+
+    @OptionGroup var runOptions: RunOptions
 }
 
 /// Executes a ref-based verb through `ActPipeline` and maps its outcome to
@@ -62,6 +64,7 @@ func runRefVerb(_ verb: ActVerb, _ arguments: RefActionArguments) throws {
             "pid": arguments.appOptions.pid.map { .int(Int($0)) },
         ]),
         kind: .action,
+        run: arguments.runOptions,
         describe: { (outcome: ActOutcome) in outcome.trajectoryInfo }
     ) {
         ActPipeline.run(
@@ -133,7 +136,9 @@ extension Act {
 
 /// Executes `act menu` through `ActPipeline.runMenu` and maps its outcome to
 /// stdout/stderr + exit code, mirroring the other verb runners.
-func runMenuVerb(_ path: MenuPath, appOverride: String?, pidOverride: pid_t?, json: Bool) throws {
+func runMenuVerb(
+    _ path: MenuPath, appOverride: String?, pidOverride: pid_t?, json: Bool, run: RunOptions
+) throws {
     let environment = ProcessInfo.processInfo.environment
     let outcome = try recorded(
         command: "act",
@@ -145,6 +150,7 @@ func runMenuVerb(_ path: MenuPath, appOverride: String?, pidOverride: pid_t?, js
             "pid": pidOverride.map { .int(Int($0)) },
         ]),
         kind: .action,
+        run: run,
         describe: { (outcome: ActOutcome) in outcome.trajectoryInfo }
     ) {
         ActPipeline.runMenu(
@@ -203,6 +209,8 @@ extension Act {
 
         @OptionGroup var appOptions: OptionalAppOptions
 
+        @OptionGroup var runOptions: RunOptions
+
         mutating func validate() throws {
             if path == nil, item.isEmpty {
                 throw ValidationError("Provide a menu path such as 'File>Save', or one --item per menu level.")
@@ -223,7 +231,8 @@ extension Act {
                 throw ExitCode(error.exitCode.rawValue)
             }
             try runMenuVerb(
-                menuPath, appOverride: appOptions.app, pidOverride: appOptions.pid, json: json
+                menuPath, appOverride: appOptions.app, pidOverride: appOptions.pid, json: json,
+                run: runOptions
             )
         }
     }
@@ -241,12 +250,15 @@ extension Act {
 /// coordinate-only verb (`drag --from e1 --to e2`, `click e1`), and unknown verbs
 /// (`act wiggle`) are all rejected by ArgumentParser as usage errors (exit 64)
 /// BEFORE this runs — a ref token is not a valid `x,y`, so it fails value parsing.
-func runCoordinateVerb(_ action: PointerAction, appOverride: String?, pidOverride: pid_t?, json: Bool) throws {
+func runCoordinateVerb(
+    _ action: PointerAction, appOverride: String?, pidOverride: pid_t?, json: Bool, run: RunOptions
+) throws {
     let environment = ProcessInfo.processInfo.environment
     let outcome = try recorded(
         command: "act",
         args: coordinateArgs(action, appOverride: appOverride, pidOverride: pidOverride, json: json),
         kind: .action,
+        run: run,
         describe: { (outcome: ActOutcome) in outcome.trajectoryInfo }
     ) {
         // `--pid` rides the pipeline's existing resolution seam (it applies only
@@ -310,8 +322,13 @@ extension Act {
 
         @OptionGroup var appOptions: OptionalAppOptions
 
+        @OptionGroup var runOptions: RunOptions
+
         mutating func run() throws {
-            try runCoordinateVerb(.click(at), appOverride: appOptions.app, pidOverride: appOptions.pid, json: json)
+            try runCoordinateVerb(
+                .click(at), appOverride: appOptions.app, pidOverride: appOptions.pid, json: json,
+                run: runOptions
+            )
         }
     }
 
@@ -329,8 +346,13 @@ extension Act {
 
         @OptionGroup var appOptions: OptionalAppOptions
 
+        @OptionGroup var runOptions: RunOptions
+
         mutating func run() throws {
-            try runCoordinateVerb(.rightClick(at), appOverride: appOptions.app, pidOverride: appOptions.pid, json: json)
+            try runCoordinateVerb(
+                .rightClick(at), appOverride: appOptions.app, pidOverride: appOptions.pid, json: json,
+                run: runOptions
+            )
         }
     }
 
@@ -348,8 +370,13 @@ extension Act {
 
         @OptionGroup var appOptions: OptionalAppOptions
 
+        @OptionGroup var runOptions: RunOptions
+
         mutating func run() throws {
-            try runCoordinateVerb(.doubleClick(at), appOverride: appOptions.app, pidOverride: appOptions.pid, json: json)
+            try runCoordinateVerb(
+                .doubleClick(at), appOverride: appOptions.app, pidOverride: appOptions.pid, json: json,
+                run: runOptions
+            )
         }
     }
 
@@ -370,8 +397,13 @@ extension Act {
 
         @OptionGroup var appOptions: OptionalAppOptions
 
+        @OptionGroup var runOptions: RunOptions
+
         mutating func run() throws {
-            try runCoordinateVerb(.drag(from: from, to: to), appOverride: appOptions.app, pidOverride: appOptions.pid, json: json)
+            try runCoordinateVerb(
+                .drag(from: from, to: to), appOverride: appOptions.app, pidOverride: appOptions.pid,
+                json: json, run: runOptions
+            )
         }
     }
 
@@ -396,8 +428,13 @@ extension Act {
 
         @OptionGroup var appOptions: OptionalAppOptions
 
+        @OptionGroup var runOptions: RunOptions
+
         mutating func run() throws {
-            try runCoordinateVerb(.scroll(at: at, dy: dy), appOverride: appOptions.app, pidOverride: appOptions.pid, json: json)
+            try runCoordinateVerb(
+                .scroll(at: at, dy: dy), appOverride: appOptions.app, pidOverride: appOptions.pid,
+                json: json, run: runOptions
+            )
         }
     }
 }
@@ -413,13 +450,15 @@ extension Act {
 /// retain). A refused/failed keyboard verb has its payload stripped by the
 /// recorder, so a secret never persists.
 func runKeyboardVerb(
-    _ action: KeyboardAction, appOverride: String?, pidOverride: pid_t?, json: Bool, args: TrajectoryArgs
+    _ action: KeyboardAction, appOverride: String?, pidOverride: pid_t?, json: Bool,
+    args: TrajectoryArgs, run: RunOptions
 ) throws {
     let environment = ProcessInfo.processInfo.environment
     let outcome = try recorded(
         command: "act",
         args: args,
         kind: .action,
+        run: run,
         describe: { (outcome: ActOutcome) in outcome.trajectoryInfo }
     ) {
         // `--pid` rides the pipeline's existing resolution seam (it applies only
@@ -456,6 +495,8 @@ extension Act {
 
         @OptionGroup var appOptions: OptionalAppOptions
 
+        @OptionGroup var runOptions: RunOptions
+
         mutating func run() throws {
             let args = TrajectoryArgs.build([
                 "verb": .string("type"),
@@ -464,7 +505,10 @@ extension Act {
                 "app": appOptions.app.map(TrajectoryArgs.Value.string),
                 "pid": appOptions.pid.map { .int(Int($0)) },
             ])
-            try runKeyboardVerb(.type(text), appOverride: appOptions.app, pidOverride: appOptions.pid, json: json, args: args)
+            try runKeyboardVerb(
+                .type(text), appOverride: appOptions.app, pidOverride: appOptions.pid, json: json,
+                args: args, run: runOptions
+            )
         }
     }
 
@@ -481,6 +525,8 @@ extension Act {
         var json = false
 
         @OptionGroup var appOptions: OptionalAppOptions
+
+        @OptionGroup var runOptions: RunOptions
 
         mutating func run() throws {
             // Parse the combo FIRST: an unknown modifier/key name is a usage error
@@ -499,7 +545,10 @@ extension Act {
                 "app": appOptions.app.map(TrajectoryArgs.Value.string),
                 "pid": appOptions.pid.map { .int(Int($0)) },
             ])
-            try runKeyboardVerb(.key(parsed), appOverride: appOptions.app, pidOverride: appOptions.pid, json: json, args: args)
+            try runKeyboardVerb(
+                .key(parsed), appOverride: appOptions.app, pidOverride: appOptions.pid, json: json,
+                args: args, run: runOptions
+            )
         }
     }
 }

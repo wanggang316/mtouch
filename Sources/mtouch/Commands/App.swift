@@ -74,6 +74,8 @@ extension App {
         @Flag(help: "Emit machine-readable JSON output.")
         var json = false
 
+        @OptionGroup var runOptions: RunOptions
+
         mutating func validate() throws {
             guard !app.isEmpty else {
                 throw ValidationError(
@@ -95,6 +97,7 @@ extension App {
                     "json": jsonOutput ? .bool(true) : nil,
                 ]),
                 kind: .action,
+                run: runOptions,
                 describe: { (outcome: AppOutcome) in outcome.trajectoryInfo }
             ) {
                 AppLifecycle.launch(bundleId: bundleId, waitReady: readyBudget, json: jsonOutput)
@@ -125,6 +128,8 @@ extension App {
         @Flag(help: "Emit machine-readable JSON output.")
         var json = false
 
+        @OptionGroup var runOptions: RunOptions
+
         mutating func run() throws {
             let bundleId = appOptions.app
             let pid = appOptions.pid
@@ -138,6 +143,7 @@ extension App {
                     "json": jsonOutput ? .bool(true) : nil,
                 ]),
                 kind: .action,
+                run: runOptions,
                 describe: { (outcome: AppOutcome) in outcome.trajectoryInfo }
             ) {
                 // `--pid` rides the same resolution seam every other command uses.
@@ -180,6 +186,8 @@ extension App {
         @Flag(help: "Emit machine-readable JSON output.")
         var json = false
 
+        @OptionGroup var runOptions: RunOptions
+
         mutating func run() throws {
             let bundleId = appOptions.app
             let pid = appOptions.pid
@@ -197,6 +205,7 @@ extension App {
                     "json": jsonOutput ? .bool(true) : nil,
                 ]),
                 kind: .action,
+                run: runOptions,
                 describe: { (outcome: AppOutcome) in outcome.trajectoryInfo }
             ) {
                 AppLifecycle.quit(

@@ -63,6 +63,8 @@ extension Clipboard {
         @Flag(help: "Emit machine-readable JSON output.")
         var json = false
 
+        @OptionGroup var runOptions: RunOptions
+
         mutating func run() throws {
             let jsonOutput = json
             let outcome = try recorded(
@@ -72,6 +74,7 @@ extension Clipboard {
                     "json": jsonOutput ? .bool(true) : nil,
                 ]),
                 kind: .read,
+                run: runOptions,
                 describe: { (outcome: ClipboardOutcome) in outcome.trajectoryInfo }
             ) {
                 ClipboardPipeline.get(json: jsonOutput)
@@ -102,6 +105,8 @@ extension Clipboard {
 
         @Flag(help: "Emit machine-readable JSON output.")
         var json = false
+
+        @OptionGroup var runOptions: RunOptions
 
         mutating func validate() throws {
             if text == nil, !stdin {
@@ -141,6 +146,7 @@ extension Clipboard {
                     "json": jsonOutput ? .bool(true) : nil,
                 ]),
                 kind: .action,
+                run: runOptions,
                 describe: { (outcome: ClipboardOutcome) in outcome.trajectoryInfo }
             ) {
                 ClipboardPipeline.set(text: payload, json: jsonOutput)
@@ -158,6 +164,8 @@ extension Clipboard {
         @Flag(help: "Emit machine-readable JSON output.")
         var json = false
 
+        @OptionGroup var runOptions: RunOptions
+
         mutating func run() throws {
             let jsonOutput = json
             let outcome = try recorded(
@@ -167,6 +175,7 @@ extension Clipboard {
                     "json": jsonOutput ? .bool(true) : nil,
                 ]),
                 kind: .action,
+                run: runOptions,
                 describe: { (outcome: ClipboardOutcome) in outcome.trajectoryInfo }
             ) {
                 ClipboardPipeline.clear(json: jsonOutput)

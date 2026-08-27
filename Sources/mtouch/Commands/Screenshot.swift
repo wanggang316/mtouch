@@ -27,6 +27,8 @@ struct Screenshot: ParsableCommand {
     ))
     var out: String?
 
+    @OptionGroup var runOptions: RunOptions
+
     mutating func run() throws {
         // The whole flow (preflight → resolve → capture → backstop → encode →
         // write) lives in `ScreenshotPipeline` as a testable value; this command
@@ -39,6 +41,7 @@ struct Screenshot: ParsableCommand {
                 "out": out.map(TrajectoryArgs.Value.string),
             ]),
             kind: .screenshot,
+            run: runOptions,
             describe: { (outcome: ScreenshotOutcome) in outcome.trajectoryInfo }
         ) {
             ScreenshotPipeline.run(window: window, out: out)

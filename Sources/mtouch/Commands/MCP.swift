@@ -9,10 +9,15 @@ struct MCP: ParsableCommand {
         abstract: "Run as an MCP (Model Context Protocol) server."
     )
 
+    @OptionGroup var runOptions: RunOptions
+
     mutating func run() throws {
+        // Resolved ONCE here, so `--run-dir`/`--capture` apply to every tool call
+        // the server goes on to serve exactly as they would to a single command.
+        let environment = runOptions.environment()
         // Never returns: it starts the stdio server on the cooperative pool and
         // runs the main run loop so AX/screenshot work can hop to the main thread.
-        MCPServer.serve()
+        MCPServer.serve(environment: environment)
     }
 }
 
@@ -53,7 +58,7 @@ enum MCPServer {
         }
     }
 
-    static func serve() -> Never {
+    static func serve(environment: [String: String] = ProcessInfo.processInfo.environment) -> Never {
         // The transport keeps its default no-op logger so NOTHING is ever written
         // to stdout except JSON-RPC frames (stdout purity).
         let server = Server(
@@ -65,7 +70,7 @@ enum MCPServer {
 
         Task {
             do {
-                await register(on: server, initState: initState)
+                await register(on: server, initState: initState, environment: environment)
                 try await server.start(transport: StdioTransport()) { _, _ in
                     // Fires when the client sends `initialize`: from here on, tool
                     // calls are accepted.
@@ -92,7 +97,9 @@ enum MCPServer {
 
     // MARK: - Handler registration
 
-    private static func register(on server: Server, initState: InitializationState) async {
+    private static func register(
+        on server: Server, initState: InitializationState, environment: [String: String]
+    ) async {
         await server.withMethodHandler(ListTools.self) { _ in
             ListTools.Result(tools: MCPToolCatalog.tools.map(makeTool))
         }
@@ -114,7 +121,7 @@ enum MCPServer {
                 MCPToolDispatch.dispatchRecorded(
                     tool: params.name,
                     arguments: arguments,
-                    environment: ProcessInfo.processInfo.environment
+                    environment: environment
                 )
             }
             // Thread routing (see MCPToolDispatch.requiresMainThread):

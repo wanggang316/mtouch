@@ -16,6 +16,7 @@ struct MTouch: ParsableCommand {
             Wait.self,
             Clipboard.self,
             Screenshot.self,
+            Report.self,
             MCP.self,
             // DEV-ONLY, hidden from --help (shouldDisplay: false). Not one of the
             // public subcommands; exercises AXTreeWalker against a live app.
