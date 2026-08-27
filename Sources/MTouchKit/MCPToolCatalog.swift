@@ -53,6 +53,16 @@ public enum MCPToolCatalog {
         description: "Emit machine-readable JSON output instead of the compact text format."
     )
 
+    /// The optional `--pid` disambiguator, mirroring the CLI. Every app-scoped tool
+    /// carries it: a bundle id can name several live processes, and the tool refuses
+    /// to guess between them. Adding this property changes no tool's NAME and no
+    /// tool's `required` set — the advertised toolset is unchanged.
+    private static let pidProperty = Property(
+        name: "pid", type: "integer",
+        description: "Process id of the target instance. Overrides bundle-id resolution; required when "
+            + "several running processes share the bundle id (the apps tool lists them)."
+    )
+
     /// The seven tools, in a stable order. EXACTLY this set is advertised by
     /// `tools/list` — no more, no fewer.
     public static let tools: [Spec] = [
@@ -63,6 +73,7 @@ public enum MCPToolCatalog {
             properties: [
                 Property(name: "app", type: "string",
                          description: "Bundle identifier of the target application, e.g. com.apple.TextEdit."),
+                pidProperty,
                 jsonProperty,
             ],
             required: ["app"]
@@ -94,6 +105,7 @@ public enum MCPToolCatalog {
                          description: "Key combination for key, e.g. 'cmd+shift+t'."),
                 Property(name: "app", type: "string",
                          description: "Bundle identifier override for coordinate/keyboard verbs."),
+                pidProperty,
                 jsonProperty,
             ],
             required: ["verb"]
@@ -105,6 +117,7 @@ public enum MCPToolCatalog {
             properties: [
                 Property(name: "app", type: "string",
                          description: "Bundle identifier of the target application."),
+                pidProperty,
                 Property(name: "appears", type: "string",
                          description: "Wait until an element matching this criteria appears, e.g. 'button \"Save\"'."),
                 Property(name: "disappears", type: "string",
@@ -147,6 +160,7 @@ public enum MCPToolCatalog {
             properties: [
                 Property(name: "app", type: "string",
                          description: "Bundle identifier of the target application."),
+                pidProperty,
                 jsonProperty,
             ],
             required: ["app"]

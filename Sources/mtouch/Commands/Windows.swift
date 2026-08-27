@@ -23,10 +23,15 @@ struct Windows: ParsableCommand {
 
     mutating func run() throws {
         let app = appOptions.app
+        let pid = appOptions.pid
         let jsonOutput = json
         let outcome = try recorded(
             command: "windows",
-            args: TrajectoryArgs.build(["app": .string(app), "json": json ? .bool(true) : nil]),
+            args: TrajectoryArgs.build([
+                "app": .string(app),
+                "pid": pid.map { .int(Int($0)) },
+                "json": json ? .bool(true) : nil,
+            ]),
             kind: .read,
             describe: { (outcome: Outcome) in
                 switch outcome {
@@ -39,7 +44,10 @@ struct Windows: ParsableCommand {
         ) { () -> Outcome in
             // Preflight/resolve/enumerate/render live in the shared pipeline so the
             // CLI and MCP surfaces stay byte-for-byte in parity by construction.
-            switch WindowsPipeline.run(bundleId: app, json: jsonOutput) {
+            // `--pid` rides the pipeline's existing resolution seam.
+            switch WindowsPipeline.run(
+                bundleId: app, json: jsonOutput, resolvePID: AppTarget.resolver(pid: pid)
+            ) {
             case let .listed(output):
                 return .listed(output)
             case let .failed(stderr, code):

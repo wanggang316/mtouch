@@ -25,6 +25,7 @@ public enum SnapshotPipeline {
         permissions: PermissionProvider = LivePermissionProvider(),
         resolvePID: (String) throws -> pid_t = { try AXWindowEnumerator.resolveRunningPID(bundleId: $0) },
         walk: (pid_t) -> WalkResult? = { pid in BoundedWalk.run { AXTreeWalker.walk(pid: pid) } },
+        diagnoseEmptyTree: (pid_t) -> AXReadFailure? = { AXWindowEnumerator.readFailure(ofPID: $0) },
         persist: (Snapshot, String, pid_t, String) throws -> Void = { snapshot, app, pid, path in
             try SessionStore.save(snapshot, app: app, pid: pid, to: path)
         }
@@ -40,12 +41,14 @@ public enum SnapshotPipeline {
             )
         }
 
-        // 2. Resolve the bundle id to a running pid.
+        // 2. Resolve the bundle id to a running pid. Each resolution failure carries
+        //    its own exit code (1 for a missing/ambiguous target, 64 for a `--pid`
+        //    that contradicts `--app`).
         let pid: pid_t
         do {
             pid = try resolvePID(bundleId)
-        } catch let error as AppNotRunningError {
-            return .failed(stderr: error.message, code: .runtimeFailure)
+        } catch let error as MTouchDiagnosticError {
+            return .failed(stderr: error.message, code: error.exitCode)
         } catch {
             return .failed(
                 stderr: "mtouch: could not resolve application '\(bundleId)': \(error)",
@@ -57,6 +60,20 @@ public enum SnapshotPipeline {
         //    becomes an explicit bounded timeout diagnostic instead of a hang.
         guard let result = walk(pid) else {
             return .failed(stderr: timeoutDiagnostic(bundleId: bundleId, pid: pid), code: .runtimeFailure)
+        }
+
+        // 3b. NO roots at all is ambiguous, because the walker flattens every failed
+        //     per-element read to a default: an app that genuinely exposes nothing
+        //     looks exactly like one whose accessibility interface refused every
+        //     read. Ask the app element directly (one read, only on this already-
+        //     degenerate path) and, if the read is REFUSED, say so at exit 1 instead
+        //     of printing an empty tree an agent would read as truth. A successful
+        //     read keeps today's behavior: an explicitly-marked empty tree, exit 0.
+        if result.nodes.isEmpty, let failure = diagnoseEmptyTree(pid) {
+            return .failed(
+                stderr: failure.diagnostic(reading: "the accessibility tree", of: bundleId),
+                code: .runtimeFailure
+            )
         }
 
         // 4. Enrich scroll areas with a derived scroll position (see ScrollEnrichment).

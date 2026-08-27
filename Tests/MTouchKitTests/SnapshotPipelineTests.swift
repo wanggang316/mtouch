@@ -45,6 +45,9 @@ private func runPipeline(
     granted: Bool = true,
     resolvePID: @escaping (String) throws -> pid_t = { _ in 4242 },
     walk: @escaping (pid_t) -> WalkResult? = { _ in sampleWalk() },
+    // Default: the app ANSWERED (no AX failure to report), so an empty tree keeps
+    // its "explicitly marked empty" behavior. Injected so no test ever probes live AX.
+    diagnoseEmptyTree: @escaping (pid_t) -> AXReadFailure? = { _ in nil },
     persist: @escaping (Snapshot, String, pid_t, String) throws -> Void = { _, _, _, _ in }
 ) -> SnapshotOutcome {
     SnapshotPipeline.run(
@@ -54,6 +57,7 @@ private func runPipeline(
         permissions: StubPermissionProvider(accessibilityGranted: granted),
         resolvePID: resolvePID,
         walk: walk,
+        diagnoseEmptyTree: diagnoseEmptyTree,
         persist: persist
     )
 }
@@ -108,6 +112,100 @@ private func runPipeline(
         #expect(code == .runtimeFailure)
         #expect(stderr.contains("com.example.nope"))
         #expect(stderr.contains("mtouch apps"))   // actionable next step
+    }
+
+    /// A bundle id naming several live processes is refused, not guessed at: the
+    /// diagnostic lists every candidate pid so `--pid` can correct it (exit 1).
+    @Test func ambiguousBundleIdFailsAtExitOneListingTheCandidates() {
+        let error = AmbiguousAppError(bundleId: "com.google.Chrome", pids: [48594, 90292])
+        let outcome = runPipeline(
+            bundleId: "com.google.Chrome",
+            environment: [:],
+            resolvePID: { _ in throw error }
+        )
+        guard case let .failed(stderr, code) = outcome else {
+            Issue.record("expected a failure outcome, got \(outcome)")
+            return
+        }
+        #expect(code == .runtimeFailure)
+        #expect(stderr == error.message)
+    }
+
+    /// A `--pid` that contradicts `--app` is a usage error (64), carried through
+    /// the same resolution seam.
+    @Test func pidBundleMismatchFailsAtExitSixtyFour() {
+        let error = PidBundleMismatchError(pid: 90292, requested: "com.google.Chrome", actual: "com.apple.Safari")
+        let outcome = runPipeline(
+            bundleId: "com.google.Chrome",
+            environment: [:],
+            resolvePID: { _ in throw error }
+        )
+        guard case let .failed(stderr, code) = outcome else {
+            Issue.record("expected a failure outcome, got \(outcome)")
+            return
+        }
+        #expect(code == .usageError)
+        #expect(stderr == error.message)
+    }
+}
+
+// MARK: - An empty tree is explained, not printed as truth
+
+@Suite struct SnapshotEmptyTreeDiagnosisTests {
+    private func emptyWalk() -> WalkResult {
+        WalkResult(nodes: [], fallbackFired: true, fallbackHelped: false, truncated: false)
+    }
+
+    /// The walker flattens every failed AX read to a default, so an app whose
+    /// accessibility interface refused everything looks exactly like one that
+    /// genuinely exposes nothing. Asking the app element directly distinguishes
+    /// them: a REFUSED read fails at exit 1 naming pid, app, and cause.
+    @Test func refusedReadBehindAnEmptyTreeFailsAtExitOne() {
+        let outcome = runPipeline(
+            bundleId: "com.google.Chrome",
+            environment: [:],
+            resolvePID: { _ in 48594 },
+            walk: { _ in self.emptyWalk() },
+            diagnoseEmptyTree: { pid in AXReadFailure(pid: pid, error: .apiDisabled) }
+        )
+        guard case let .failed(stderr, code) = outcome else {
+            Issue.record("expected a failure outcome, got \(outcome)")
+            return
+        }
+        #expect(code == .runtimeFailure)
+        #expect(stderr.contains("com.google.Chrome"))
+        #expect(stderr.contains("48594"))
+        #expect(stderr.contains("accessibility tree"))
+        #expect(stderr.contains("accessibility API is disabled"))
+        #expect(stderr.contains("AXError -25211"))
+        #expect(stderr.contains("--pid"))
+    }
+
+    /// When the app ANSWERED, an empty tree is the truth: today's explicitly
+    /// marked empty tree at exit 0 is preserved (VAL-SNAP-009).
+    @Test func answeredEmptyTreeStillRendersTheEmptyMarkerAtExitZero() {
+        let outcome = runPipeline(
+            environment: [:],
+            walk: { _ in self.emptyWalk() },
+            diagnoseEmptyTree: { _ in nil }
+        )
+        guard case let .rendered(output) = outcome else {
+            Issue.record("expected a rendered outcome, got \(outcome)")
+            return
+        }
+        #expect(!output.isEmpty)   // never blank stdout
+    }
+
+    /// The extra AX round trip is confined to the degenerate path: a tree with any
+    /// root at all is never re-probed.
+    @Test func aPopulatedTreeIsNeverDiagnosed() {
+        var probed = false
+        let outcome = runPipeline(
+            environment: [:],
+            diagnoseEmptyTree: { _ in probed = true; return AXReadFailure(pid: 1, error: .apiDisabled) }
+        )
+        #expect(probed == false)
+        if case .failed = outcome { Issue.record("a populated tree must still render") }
     }
 }
 

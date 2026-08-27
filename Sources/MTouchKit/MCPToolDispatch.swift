@@ -218,9 +218,10 @@ public enum MCPToolDispatch {
         guard let app = args.string("app"), !app.isEmpty else {
             return invalidArgs("snapshot requires an 'app' argument (a bundle identifier such as com.apple.TextEdit).")
         }
+        guard let resolvePID = resolvePIDSeam(args) else { return invalidPID() }
         let outcome = SnapshotPipeline.run(
             bundleId: app, json: args.bool("json") ?? false,
-            environment: environment, permissions: permissions
+            environment: environment, permissions: permissions, resolvePID: resolvePID
         )
         switch outcome {
         case let .rendered(output): return .text(output)
@@ -239,6 +240,12 @@ public enum MCPToolDispatch {
         }
         let json = args.bool("json") ?? false
         let app = args.string("app")
+        // Same rule as the CLI's `OptionalAppOptions`: a pid with no bundle id to
+        // check it against is refused rather than trusted blindly.
+        if args.isPresent("pid"), (app ?? "").isEmpty {
+            return invalidArgs(AppTarget.pidRequiresAppMessage)
+        }
+        guard let resolvePID = resolvePIDSeam(args) else { return invalidPID() }
 
         switch verb {
         case "press", "focus", "show-menu", "set-value":
@@ -276,7 +283,7 @@ public enum MCPToolDispatch {
             }
             return fromAct(ActPipeline.runCoordinate(
                 action: action, appOverride: app, json: json,
-                environment: environment, permissions: permissions
+                environment: environment, permissions: permissions, resolvePID: resolvePID
             ))
 
         case "drag":
@@ -285,7 +292,7 @@ public enum MCPToolDispatch {
             }
             return fromAct(ActPipeline.runCoordinate(
                 action: .drag(from: from, to: to), appOverride: app, json: json,
-                environment: environment, permissions: permissions
+                environment: environment, permissions: permissions, resolvePID: resolvePID
             ))
 
         case "type":
@@ -294,7 +301,7 @@ public enum MCPToolDispatch {
             }
             return fromAct(ActPipeline.runKeyboard(
                 action: .type(text), appOverride: app, json: json,
-                environment: environment, permissions: permissions
+                environment: environment, permissions: permissions, resolvePID: resolvePID
             ))
 
         case "key":
@@ -312,7 +319,7 @@ public enum MCPToolDispatch {
             }
             return fromAct(ActPipeline.runKeyboard(
                 action: .key(parsed), appOverride: app, json: json,
-                environment: environment, permissions: permissions
+                environment: environment, permissions: permissions, resolvePID: resolvePID
             ))
 
         default:
@@ -339,6 +346,7 @@ public enum MCPToolDispatch {
         guard let app = args.string("app"), !app.isEmpty else {
             return invalidArgs("wait requires an 'app' argument (a bundle identifier).")
         }
+        guard let resolvePID = resolvePIDSeam(args) else { return invalidPID() }
         let appears = args.string("appears")
         let disappears = args.string("disappears")
         let text = args.string("text")
@@ -369,7 +377,8 @@ public enum MCPToolDispatch {
         )
         let outcome = WaitPipeline.run(
             bundleId: app, condition: condition,
-            timeout: timeout.seconds, interval: interval.seconds, permissions: permissions
+            timeout: timeout.seconds, interval: interval.seconds,
+            permissions: permissions, resolvePID: resolvePID
         )
         switch outcome {
         case .satisfied:
@@ -422,7 +431,11 @@ public enum MCPToolDispatch {
         guard let app = args.string("app"), !app.isEmpty else {
             return invalidArgs("windows requires an 'app' argument (a bundle identifier).")
         }
-        switch WindowsPipeline.run(bundleId: app, json: args.bool("json") ?? false, permissions: permissions) {
+        guard let resolvePID = resolvePIDSeam(args) else { return invalidPID() }
+        switch WindowsPipeline.run(
+            bundleId: app, json: args.bool("json") ?? false,
+            permissions: permissions, resolvePID: resolvePID
+        ) {
         case let .listed(output):
             return .text(output)
         case let .failed(stderr, _):
@@ -443,6 +456,21 @@ public enum MCPToolDispatch {
     }
 
     // MARK: - Helpers
+
+    /// The pid-resolution seam for an app-scoped tool, built from the OPTIONAL
+    /// `pid` argument so the MCP surface targets a specific instance exactly as
+    /// `--pid` does on the CLI (same resolver, same diagnostics, same payloads).
+    /// nil ⇒ `pid` was present but not a usable process id, which the caller maps
+    /// to a domain failure — the analogue of the CLI's parse-time usage error.
+    private static func resolvePIDSeam(_ args: ToolArguments) -> ((String) throws -> pid_t)? {
+        guard args.isPresent("pid") else { return AppTarget.resolver(pid: nil) }
+        guard let raw = args.int("pid"), let pid = pid_t(exactly: raw) else { return nil }
+        return AppTarget.resolver(pid: pid)
+    }
+
+    private static func invalidPID() -> ToolResult {
+        invalidArgs("'pid' must be the process id of a running application (an integer).")
+    }
 
     /// A domain (invalid-argument) failure: the SDK does not validate tool
     /// arguments, so a missing/malformed argument surfaces as an isError result,

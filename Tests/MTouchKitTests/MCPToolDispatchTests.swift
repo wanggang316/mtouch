@@ -1,3 +1,4 @@
+import Foundation
 import Testing
 @testable import MTouchKit
 
@@ -56,6 +57,33 @@ private func call(_ tool: String, _ args: [String: ToolArgumentValue],
         #expect(spec("screenshot").required.isEmpty)
         #expect(spec("apps").required.isEmpty)
         #expect(spec("doctor").required.isEmpty)
+    }
+
+    /// `--pid` parity: every app-scoped tool advertises an OPTIONAL integer `pid`,
+    /// so an MCP client can disambiguate two instances exactly as the CLI does.
+    @Test func appScopedToolsAdvertiseAnOptionalIntegerPid() throws {
+        for name in ["snapshot", "act", "wait", "windows"] {
+            let spec = try #require(MCPToolCatalog.tools.first { $0.name == name })
+            let pid = try #require(spec.properties.first { $0.name == "pid" },
+                                   "\(name) should advertise a pid property")
+            #expect(pid.type == "integer")
+            #expect(!pid.description.isEmpty)
+            // Optional: adding it must not change what a client MUST send.
+            #expect(!spec.required.contains("pid"))
+        }
+    }
+
+    /// Adding a property must not add, rename, or remove a TOOL (VAL-MCP-002).
+    @Test func addingPidChangesNoToolName() {
+        #expect(MCPToolCatalog.tools.count == 7)
+        #expect(Set(MCPToolCatalog.toolNames) == [
+            "snapshot", "act", "wait", "screenshot", "apps", "windows", "doctor",
+        ])
+        // Tools with no app argument gain nothing.
+        for name in ["screenshot", "apps", "doctor"] {
+            let spec = MCPToolCatalog.tools.first { $0.name == name }
+            #expect(spec?.properties.contains { $0.name == "pid" } == false)
+        }
     }
 
     @Test func actVerbEnumCoversTheGrammar() {
@@ -260,5 +288,90 @@ private func call(_ tool: String, _ args: [String: ToolArgumentValue],
         let result = call("doctor", ["json": .bool(true)], permissions: axOnly)
         #expect(!result.isError)
         #expect(text(result) == DoctorReport(provider: axOnly).jsonString())
+    }
+}
+
+// MARK: - pid targeting over MCP (CLI parity)
+
+/// A pid no process can hold (pids stay far below Int32.max), so these exercise
+/// the targeting seam without any live process, AX call, or TCC grant.
+private let absentPID: pid_t = 2_147_483_647
+
+@Suite struct MCPPidTargetingTests {
+    /// The pid reaches the SAME resolver the CLI uses, so the payload is the CLI's
+    /// stderr line verbatim — an agent switching surfaces re-learns nothing.
+    @Test func unknownPidYieldsTheSameDiagnosticTheCLIPrints() {
+        let result = call("windows", ["app": .string("com.google.Chrome"), "pid": .int(Int(absentPID))],
+                          permissions: axOnly)
+        #expect(result.isError)
+        #expect(text(result) == PidNotRunningError(pid: absentPID).message)
+    }
+
+    /// The permission gate still precedes targeting, so a pid cannot smuggle a
+    /// tool past a missing grant.
+    @Test func pidDoesNotBypassThePermissionGate() {
+        let result = call("windows", ["app": .string("com.google.Chrome"), "pid": .int(Int(absentPID))],
+                          permissions: ungranted)
+        #expect(result.isError)
+        #expect(text(result) == PermissionError(permission: .accessibility).diagnostic)
+    }
+
+    /// Same seam on the other app-scoped tools.
+    @Test func snapshotAndWaitAcceptThePidToo() {
+        let snapshot = call("snapshot", ["app": .string("com.google.Chrome"), "pid": .int(Int(absentPID))],
+                            permissions: axOnly)
+        #expect(snapshot.isError)
+        #expect(text(snapshot) == PidNotRunningError(pid: absentPID).message)
+
+        let wait = call("wait", ["app": .string("com.google.Chrome"), "pid": .int(Int(absentPID)),
+                                 "text": .string("hi"), "timeout": .string("1s")],
+                        permissions: axOnly)
+        #expect(wait.isError)
+        #expect(text(wait) == PidNotRunningError(pid: absentPID).message)
+    }
+
+    /// A pid sent as a JSON string still coerces (the lenient accessor contract).
+    @Test func pidAcceptsAStringifiedInteger() {
+        let result = call("windows", ["app": .string("com.google.Chrome"), "pid": .string("\(absentPID)")],
+                          permissions: axOnly)
+        #expect(result.isError)
+        #expect(text(result) == PidNotRunningError(pid: absentPID).message)
+    }
+
+    /// A non-integer pid is a domain (invalid-argument) failure, the analogue of
+    /// the CLI's parse-time usage error.
+    @Test func nonIntegerPidIsInvalidArgs() {
+        let result = call("windows", ["app": .string("com.google.Chrome"), "pid": .string("nope")],
+                          permissions: axOnly)
+        #expect(result.isError)
+        #expect(text(result)?.contains("invalid arguments") == true)
+        #expect(text(result)?.contains("'pid'") == true)
+    }
+
+    /// A pid out of process-id range cannot name a process, so it is refused
+    /// rather than truncated into some OTHER process's id.
+    @Test func outOfRangePidIsInvalidArgs() {
+        let result = call("windows", ["app": .string("com.google.Chrome"), "pid": .int(9_999_999_999)],
+                          permissions: axOnly)
+        #expect(result.isError)
+        #expect(text(result)?.contains("invalid arguments") == true)
+    }
+
+    /// `act` mirrors the CLI's `OptionalAppOptions`: a pid with no app to check it
+    /// against is refused, not trusted blindly.
+    @Test func actRefusesAPidWithoutAnApp() {
+        let result = call("act", ["verb": .string("click"), "at": .string("10,10"), "pid": .int(Int(absentPID))],
+                          permissions: axOnly)
+        #expect(result.isError)
+        #expect(text(result)?.contains(AppTarget.pidRequiresAppMessage) == true)
+    }
+
+    /// With an app, `act`'s coordinate verb resolves through the same seam.
+    @Test func actCoordinateVerbHonorsThePid() {
+        let result = call("act", ["verb": .string("click"), "at": .string("10,10"),
+                                  "app": .string("com.google.Chrome"), "pid": .int(Int(absentPID))],
+                          permissions: axOnly, environment: [MTouchEnvironment.sessionKey: "/nonexistent/session.json"])
+        #expect(result.isError)
+        #expect(text(result) == PidNotRunningError(pid: absentPID).message)
     }
 }

@@ -71,6 +71,7 @@ struct Wait: ParsableCommand {
             command: "wait",
             args: TrajectoryArgs.build([
                 "app": .string(appOptions.app),
+                "pid": appOptions.pid.map { .int(Int($0)) },
                 "appears": appears.map(TrajectoryArgs.Value.string),
                 "disappears": disappears.map(TrajectoryArgs.Value.string),
                 "text": text.map(TrajectoryArgs.Value.string),
@@ -82,11 +83,13 @@ struct Wait: ParsableCommand {
             kind: .read,
             describe: { (outcome: WaitOutcome) in outcome.trajectoryInfo }
         ) {
+            // `--pid` rides the pipeline's existing resolution seam.
             WaitPipeline.run(
                 bundleId: appOptions.app,
                 condition: condition,
                 timeout: timeout.seconds,
-                interval: (interval ?? Self.defaultInterval).seconds
+                interval: (interval ?? Self.defaultInterval).seconds,
+                resolvePID: AppTarget.resolver(pid: appOptions.pid)
             )
         }
 

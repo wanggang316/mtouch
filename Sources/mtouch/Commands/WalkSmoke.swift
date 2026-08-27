@@ -18,12 +18,14 @@ struct WalkSmoke: ParsableCommand {
     mutating func run() throws {
         preflightOrExit(Preflight.requireAccessibility)
 
+        // Same resolution seam as the real commands, so `--pid` disambiguates here
+        // too and every refusal keeps its own exit code.
         let pid: pid_t
         do {
-            pid = try AXWindowEnumerator.resolveRunningPID(bundleId: appOptions.app)
-        } catch let error as AppNotRunningError {
+            pid = try AppTarget.resolver(pid: appOptions.pid)(appOptions.app)
+        } catch let error as MTouchDiagnosticError {
             FileHandle.standardError.write(Data((error.message + "\n").utf8))
-            throw ExitCode(MTouchExitCode.runtimeFailure.rawValue)
+            throw ExitCode(error.exitCode.rawValue)
         }
 
         let result = AXTreeWalker.walk(pid: pid)

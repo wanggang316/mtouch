@@ -4,9 +4,20 @@ import MTouchKit
 
 // MARK: - Shared --app option groups
 
+/// Help for `--pid`, shared by both groups: it is the disambiguator for a bundle
+/// id that names several live processes, which `--app` alone cannot express.
+private let pidHelp = ArgumentHelp(
+    "Process id of the target instance. Overrides bundle-id resolution; required when "
+        + "several running processes share the bundle id ('mtouch apps' lists them).",
+    valueName: "pid"
+)
+
 struct RequiredAppOptions: ParsableArguments {
     @Option(help: ArgumentHelp("Bundle identifier of the target application.", valueName: "bundleId"))
     var app: String
+
+    @Option(help: pidHelp)
+    var pid: pid_t?
 
     mutating func validate() throws {
         guard !app.isEmpty else {
@@ -19,9 +30,18 @@ struct OptionalAppOptions: ParsableArguments {
     @Option(help: ArgumentHelp("Bundle identifier of the target application.", valueName: "bundleId"))
     var app: String?
 
+    @Option(help: pidHelp)
+    var pid: pid_t?
+
     mutating func validate() throws {
         if let app, app.isEmpty {
             throw ValidationError("--app value must not be empty; pass a bundle identifier such as 'com.apple.Safari'.")
+        }
+        // A pid with no bundle id to check it against would have to be trusted
+        // blindly, so it is refused at parse time (exit 64) rather than silently
+        // ignored — the same "refuse, do not guess" rule the resolver applies.
+        if pid != nil, app == nil {
+            throw ValidationError(AppTarget.pidRequiresAppMessage)
         }
     }
 }

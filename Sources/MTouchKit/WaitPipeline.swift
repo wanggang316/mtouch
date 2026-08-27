@@ -48,13 +48,15 @@ public enum WaitPipeline {
             )
         }
 
-        // 2. Resolve the bundle id to a running pid (exit 1). A non-running target
-        //    is not wait-able: fail immediately rather than burning the timeout.
+        // 2. Resolve the bundle id to a running pid. A non-running, ambiguous, or
+        //    self-contradictory target is not wait-able: fail immediately rather
+        //    than burning the timeout, with the exit code the failure carries (1 for
+        //    a missing/ambiguous target, 64 for a `--pid` that contradicts `--app`).
         let pid: pid_t
         do {
             pid = try resolvePID(bundleId)
-        } catch let error as AppNotRunningError {
-            return .failed(stderr: error.message, code: .runtimeFailure)
+        } catch let error as MTouchDiagnosticError {
+            return .failed(stderr: error.message, code: error.exitCode)
         } catch {
             return .failed(
                 stderr: "mtouch: could not resolve application '\(bundleId)': \(error)",

@@ -243,8 +243,10 @@ public enum ActPipeline {
             let pid: pid_t
             do {
                 pid = try resolvePID(appOverride)
-            } catch let error as AppNotRunningError {
-                return .terminal(.failed(stderr: error.message, code: .runtimeFailure))
+            } catch let error as MTouchDiagnosticError {
+                // Each resolution failure carries its own exit code: 1 for a
+                // missing/ambiguous target, 64 for a `--pid` contradicting `--app`.
+                return .terminal(.failed(stderr: error.message, code: error.exitCode))
             } catch {
                 return .terminal(.failed(
                     stderr: "mtouch: could not resolve application '\(appOverride)': \(error)",

@@ -27,7 +27,7 @@ public enum WindowsPipeline {
         json: Bool,
         permissions: PermissionProvider = LivePermissionProvider(),
         resolvePID: (String) throws -> pid_t = { try AXWindowEnumerator.resolveRunningPID(bundleId: $0) },
-        enumerate: (pid_t) -> [WindowInfo] = { AXWindowEnumerator.windows(ofPID: $0) }
+        enumerate: (pid_t) -> Result<[WindowInfo], AXReadFailure> = { AXWindowEnumerator.windows(ofPID: $0) }
     ) -> WindowsOutcome {
         // 1. Preflight FIRST (exit 2): a missing grant fails fast with the
         //    doctor-pointing diagnostic.
@@ -38,13 +38,15 @@ public enum WindowsPipeline {
             )
         }
 
-        // 2. Resolve the bundle id to a running pid (exit 1). A non-running target
-        //    has no windows to list: fail immediately.
+        // 2. Resolve the bundle id to a running pid. A non-running target has no
+        //    windows to list, and an ambiguous or self-contradictory one must not be
+        //    guessed at: each resolution failure carries its own exit code (1 for a
+        //    missing/ambiguous target, 64 for a `--pid` that contradicts `--app`).
         let pid: pid_t
         do {
             pid = try resolvePID(bundleId)
-        } catch let error as AppNotRunningError {
-            return .failed(stderr: error.message, code: .runtimeFailure)
+        } catch let error as MTouchDiagnosticError {
+            return .failed(stderr: error.message, code: error.exitCode)
         } catch {
             return .failed(
                 stderr: "mtouch: could not resolve application '\(bundleId)': \(error)",
@@ -52,9 +54,23 @@ public enum WindowsPipeline {
             )
         }
 
-        // 3. Enumerate + render (exit 0). Zero windows is a success state, said so
-        //    explicitly in text mode; JSON always emits the (possibly empty) array.
-        let windows = enumerate(pid)
+        // 3. Enumerate. A REFUSED read (exit 1) is not an empty listing: reporting
+        //    "no windows" for an app whose accessibility interface would not answer
+        //    hands an agent a falsehood it cannot detect, so the AX error is named.
+        let windows: [WindowInfo]
+        switch enumerate(pid) {
+        case let .success(listed):
+            windows = listed
+        case let .failure(failure):
+            return .failed(
+                stderr: failure.diagnostic(reading: "windows", of: bundleId),
+                code: .runtimeFailure
+            )
+        }
+
+        // 4. Render (exit 0). Zero windows — the app ANSWERED, with none — is a
+        //    success state, said so explicitly in text mode; JSON always emits the
+        //    (possibly empty) array, never null.
         if json {
             return .listed(WindowInfo.jsonArray(windows))
         }

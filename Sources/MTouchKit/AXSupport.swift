@@ -40,13 +40,31 @@ public enum AXSupport {
         _ = AXUIElementSetMessagingTimeout(element, seconds)
     }
 
-    /// Copies an attribute value, mapping every AX error to nil.
+    /// Copies an attribute value, mapping every AX error to nil. Lossy BY DESIGN
+    /// for the many reads whose absence is unremarkable (no subrole, no title).
+    /// Reads whose failure must be reported — anything an "empty" answer would
+    /// misrepresent as truth — use `copyAttributeResult` instead.
     public static func copyAttribute(_ element: AXUIElement, _ attribute: String) -> CFTypeRef? {
+        copyAttributeResult(element, attribute).value
+    }
+
+    /// Copies an attribute value, PRESERVING the `AXError` on failure: `error` is
+    /// nil exactly when the read succeeded, and `value` is nil whenever it failed.
+    ///
+    /// The distinction is load-bearing: a nil `value` with no error (the app
+    /// answered, with nothing) and a nil `value` with `.apiDisabled` (the app's
+    /// accessibility interface refused to answer) are opposite facts that
+    /// `copyAttribute` flattens into the same nil. Collapsing them let a hard AX
+    /// failure masquerade as a truthful "zero windows" answer, which is the worst
+    /// possible outcome for an agent. A tuple rather than a `Result` because the
+    /// imported `AXError` is not an `Error` and must not be retroactively made one.
+    public static func copyAttributeResult(
+        _ element: AXUIElement, _ attribute: String
+    ) -> (value: CFTypeRef?, error: AXError?) {
         var value: CFTypeRef?
-        guard AXUIElementCopyAttributeValue(element, attribute as CFString, &value) == .success else {
-            return nil
-        }
-        return value
+        let status = AXUIElementCopyAttributeValue(element, attribute as CFString, &value)
+        guard status == .success else { return (nil, status) }
+        return (value, nil)
     }
 
     /// CGWindowID of a window element via the private `_AXUIElementGetWindow`,
@@ -97,5 +115,55 @@ public enum AXSupport {
         let axValue = value as! AXValue
         guard AXValueGetType(axValue) == type else { return nil }
         return axValue
+    }
+}
+
+/// A HARD accessibility read failure against a specific process: the app element
+/// refused the read outright, so nothing at all could be learned about it. This is
+/// categorically different from an app that answered with nothing, and it must
+/// never be rendered as an empty result — an agent cannot tell a lie from a fact.
+///
+/// Carries the pid and the raw `AXError` so the diagnostic can name both the
+/// process and a human-readable cause, plus the numeric code for anything the
+/// mapping does not recognize.
+public struct AXReadFailure: Error, Equatable, Sendable {
+    public let pid: pid_t
+    public let error: AXError
+
+    public init(pid: pid_t, error: AXError) {
+        self.pid = pid
+        self.error = error
+    }
+
+    /// Human-readable cause plus the raw code, e.g.
+    /// `the accessibility API is disabled for that process (AXError -25211)`.
+    /// The three codes a live target realistically produces are named
+    /// individually; everything else degrades to the numeric code rather than a
+    /// misleading guess.
+    public var cause: String {
+        let explanation: String
+        switch error {
+        case .apiDisabled:
+            explanation = "the accessibility API is disabled for that process"
+        case .cannotComplete:
+            explanation = "the process did not respond in time (it may be hung, busy, or stopped)"
+        case .invalidUIElement:
+            explanation = "the process is no longer a valid accessibility target (it may have exited)"
+        case .notImplemented:
+            explanation = "the process does not implement the accessibility API"
+        default:
+            explanation = "the accessibility read failed"
+        }
+        return "\(explanation) (AXError \(error.rawValue))"
+    }
+
+    /// The pinned stderr diagnostic. `subject` names WHAT could not be read
+    /// ("windows", "the accessibility tree") so one wording serves every surface;
+    /// the tail is the recovery path an agent can actually follow, because the
+    /// usual cause is a second instance of the same bundle id.
+    public func diagnostic(reading subject: String, of bundleId: String) -> String {
+        "mtouch: could not read \(subject) of '\(bundleId)' (pid \(pid)): \(cause). "
+            + "It may be a second instance of the app, or an unresponsive process — "
+            + "run 'mtouch apps' and retry with --pid <pid>."
     }
 }
