@@ -23,6 +23,23 @@ jobs:
       - name: Unit tests
         run: swift test
 
+  smoke:
+    name: CLI end-to-end smoke
+    # Exercises the SHIPPED binary end to end using only behaviour that needs no
+    # TCC grant and no display: the subcommand surface, the exit-code taxonomy,
+    # the MCP stdio handshake, and the offline report renderer. This is the layer
+    # unit tests cannot reach — argument parsing, process wiring, and the actual
+    # rendered artifact — and it is where a broken release would show first.
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build
+        run: swift build
+      - name: Smoke
+        run: |
+          chmod +x ci/smoke.sh
+          MTOUCH_BIN=.build/debug/mtouch ci/smoke.sh
+
   ungranted-verification:
     name: Ungranted-persona live verification
     # Verifies the ungranted-persona fail-fast behavior (exit 2) that a granted

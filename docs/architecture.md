@@ -123,12 +123,61 @@ optional (only `screenshot` needs it). Grants attach to the **invoking terminal 
 — so an ungranted persona is unrealizable from a granted terminal without TCC mutation (forbidden);
 such assertions are verified at the unit level or deferred to an ungranted CI runner. No headless mode.
 
+## Seams & patterns (established M4/M5 — control surface & evidence)
+
+- **App lifecycle** (`AppControl` / `AppLifecycle`): `WorkspaceControl` is a seam over launch,
+  frontmost detection and termination. The live implementation deliberately does NOT use
+  `NSWorkspace.runningApplications` / `.frontmostApplication` for POLLING: those properties never
+  refresh without a main run loop, which a one-shot CLI never runs, so a launched process is never
+  observed and an app switch is never seen. Both failure directions are silent-but-wrong (a healthy
+  launch reads as a timeout, a successful activation as a lost race). Readiness uses a LaunchServices
+  query; frontmost verification uses the AX system-wide focused application. `resolveRunningPID` is
+  unaffected because it is a single read, not a poll.
+- **Menu-path invocation** (`MenuPath` / `MenuNavigator` / `ActMenuPipeline`): drives the menu bar by
+  title path with exact → case-insensitive → localized matching. This is the reliable route into
+  AX-opaque apps whose editor views expose nothing: the menu bar is still a real AX tree, so every
+  step is a verifiable press. **Every failure path closes the menus it opened** — a failed attempt
+  that leaves a menu open wedges the UI for everything after it.
+- **Quiescence** (`WaitQuiescence`): a scoped tree digest plus a clock-injected tracker; any change
+  resets the quiet window. Used by `wait --stable` and by the act pipeline's settle step, so
+  "settled" means one thing in the codebase, not two.
+- **Element identity** (`AXLabel`, `NodeHint`, `MatchKey`): role + subrole + title + description +
+  identifier, pinned to the owning `CGWindowID`. Labels are part of ref identity because controls
+  with no title are otherwise indistinguishable, and a positional carry-over silently re-points a ref
+  at its neighbour. `usableIdentifier` filters AppKit's `_NS:<n>` nib-decoding indices out of the
+  DISPLAY label (they are meaningless and build-unstable) while JSON still publishes the raw value.
+- **Cycle safety** (`AXCycleGuard`): applications can expose their own application element as their
+  own child. Without cycle detection the walk fills the node budget with recursion and the real
+  window never appears in the snapshot at all. The depth cap is a backstop, not the guard, and a cut
+  is REPORTED in the same grammar as the node-budget truncation marker.
+- **Input delivery** (`InputDeliveryFlush`): `CGEvent.post` is asynchronous. Posting and returning
+  lets the process exit before the window server delivers, which reports success while delivering
+  nothing. Delivery waits on an observable signal (`CGEventSourceCounterForEventType`) with a bounded
+  deadline — not a sleep — and an unconfirmed delivery is reported as such rather than as clean
+  success.
+- **Evidence** (`RunBundle` / `RunCapture` / `RunFrameExtraction` / `RunReport`): a run directory
+  holds `run.json`, the trajectory, per-step stills and a recording. The step counter is allocated
+  under the same advisory lock that guards the append, so concurrent mtouch processes cannot collide
+  on a step index. Evidence collection NEVER breaks the task it documents: a capture failure is
+  recorded and execution continues at the command's normal exit code.
+- **Recording** (`RecordControl` / `RecordArtifact` / `LiveScreenRecorder`): a `setsid`-detached
+  recorder, a control file, and artifact verification. A recording is only reported successful when
+  the recorder COUNTERSIGNED it after finalize — screen capture flushes playable fragments
+  continuously, so a killed capture leaves a well-formed movie that passes every artifact check.
+  Because a second capture session from the same client application invalidates a live recording,
+  step stills during a recording are extracted from the movie instead of captured separately.
+
 ## Milestones
 
 - **M1-perception** (sealed 2026-08-06): scaffold, doctor/TCC preflight, app/window enumeration, AX
   walker + Electron fallback, textualization/refs/noise/secure-mask, session store, snapshot CLI,
-  menu-collapse. 17/20 assertions PASS live/unit; 3 (ungranted-persona) deferred.
+  menu-collapse.
 - **M2-action-loop** (sealed 2026-08-06): CGEvent synthesis, post-action diff, act element/typing/
   coordinate commands, wait primitives.
-- **M3-agent-surface** (implemented; validation in progress): ScreenCaptureKit screenshots, the MCP
-  stdio server (seven tools), and trajectory recording — the agent surface. 364 tests passing.
+- **M3-agent-surface** (sealed 2026-08-07): ScreenCaptureKit screenshots, the MCP stdio server, and
+  trajectory recording.
+- **M4-control-surface / M5-evidence** (2026-08-27/28): app lifecycle, clipboard, menu-path
+  invocation, quiescence waits, untruncated + criteria-scoped reads, `--pid` targeting, AX error
+  surfacing, cycle safety, label-based element identity, unverified delivery, the delivery flush, the
+  run evidence bundle, screen recording, and the HTML report. Driven by end-to-end scenarios against
+  real third-party applications; every defect listed above was found that way, not by unit tests.
