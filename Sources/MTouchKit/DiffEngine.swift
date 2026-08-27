@@ -4,24 +4,37 @@ import CoreGraphics
 /// tree, and carries refs across so the resulting session stays act-able.
 ///
 /// ## Identity heuristic
-/// Elements are matched POSITIONALLY: the stable identity is `role` + structural
-/// PATH, judged over the same noise-filtered view the renderers use. Title,
-/// value, enabled, and frame are treated as CHANGEABLE attributes, NOT identity —
-/// so an element whose title or value changed but whose role and path are stable
-/// is reported as CHANGED (keeping its ref), never as remove+add. `value` alone
-/// (the thing that most often changes) never drives identity. When the role at a
+/// Elements are matched POSITIONALLY: the stable identity is `role` + the
+/// accessibility LABEL (`description` + `identifier`) + structural PATH, judged
+/// over the same noise-filtered view the renderers use. Title, value, enabled, and
+/// frame are treated as CHANGEABLE attributes, NOT identity — so an element whose
+/// title or value changed but whose role, label, and path are stable is reported
+/// as CHANGED (keeping its ref), never as remove+add. `value` alone (the thing
+/// that most often changes) never drives identity. When the role or the label at a
 /// path differs, the element is considered replaced: the PRE node is REMOVED and
 /// the POST node ADDED. The positional match is owning-window-AWARE: a same-path
 /// role match between two KNOWN-DIFFERENT windows (a sibling window that slid into
 /// a vacated slot) is NOT the same element and is left unmatched.
+///
+/// The LABEL belongs in identity — and title does not — because they answer
+/// different questions for the controls that have no title at all. A title is how
+/// a titled control reports its STATE ("Save" → "Saving…"), and the matched ref
+/// simply refreshes its hints. A `description`/`identifier` is the only NAME a
+/// titleless control has; whole keypads report `AXButton` with no subrole and no
+/// title, so without the label a sibling insert or removal shifts the row by one
+/// and EVERY ref positionally "matches" its neighbour, carries onto it, and the
+/// next action presses the wrong control while reporting success. With the label
+/// in identity the shifted row is instead re-paired by the cross-path pass onto
+/// the element that still carries the same label, and any ref whose label is gone
+/// goes STALE rather than being re-pointed.
 ///
 /// ## Cross-path fallback
 /// A pure positional match misreads a subtree that SHIFTED to a new path (a root
 /// insert/remove — e.g. closing a window while the menu bar is a sibling root, or
 /// a sheet appearing) as remove+re-add of the shifted subtrees. After the
 /// positional pass, a CROSS-PATH fallback re-pairs a still-unmatched PRE node with
-/// a still-unmatched POST node when their `role` + `title` match UNIQUELY — and,
-/// when both nodes' owning-window ids are known, those ids are EQUAL too. A
+/// a still-unmatched POST node when their `role` + `title` + LABEL match UNIQUELY
+/// — and, when both nodes' owning-window ids are known, those ids are EQUAL too. A
 /// re-paired node carries its ref across the shift (treated like a matched node —
 /// CHANGED if any rendered attribute differs, else unchanged), instead of
 /// remove+add. The pass is deliberately conservative: any ambiguity (two
@@ -61,13 +74,16 @@ public enum DiffEngine {
         func preWindowID(_ path: [Int]) -> CGWindowID? { preWindowIDByRoot[Array(path.prefix(1))] }
         func postWindowID(_ path: [Int]) -> CGWindowID? { postWindowIDsByPath[Array(path.prefix(1))] }
 
-        // A path is positionally matched when the SAME role sits there in PRE and
-        // POST AND the owning-window identity is compatible (equal, or unknown on
-        // either side). A same-path role match between two KNOWN-DIFFERENT windows
-        // is left UNMATCHED for the cross-path pass to resolve by window id.
+        // A path is positionally matched when the SAME role AND the SAME label sit
+        // there in PRE and POST AND the owning-window identity is compatible (equal,
+        // or unknown on either side). A same-path role match between two
+        // KNOWN-DIFFERENT windows, or between two differently-LABELLED elements
+        // (the row shifted under this path), is left UNMATCHED for the cross-path
+        // pass to resolve by window id / label.
         func positionallyMatches(_ path: [Int]) -> Bool {
             guard let preItem = preByPath[path], let postItem = postByPath[path],
-                  preItem.node.role == postItem.node.role else { return false }
+                  preItem.node.role == postItem.node.role,
+                  labelsMatch(preItem.node, postItem.node) else { return false }
             return windowCarryAllowed(stored: preWindowID(path), post: postWindowID(path))
         }
 
@@ -176,7 +192,18 @@ public enum DiffEngine {
             if let prePath = matchedPrePath,
                let preRef = pre.ref(atPath: prePath),
                let preEntry = pre.refs[preRef],
-               preEntry.role == item.node.role {
+               preEntry.role == item.node.role,
+               // The label the ref actually RECORDED must survive too, and this is
+               // not implied by the matchers above. They compare the PRE tree to the
+               // POST tree, whereas `preEntry` comes from the persisted session — in
+               // the act pipeline the PRE snapshot pairs the freshly walked tree with
+               // the SESSION's ref table, so an element whose label changed between
+               // the snapshot and the pre-action walk would be matched by the tree
+               // passes while no longer answering to the name the ref was issued for.
+               // Gating on the persisted value keeps the ref's own identity
+               // authoritative: it is never re-homed onto a differently-named element.
+               preEntry.description == item.node.description,
+               preEntry.identifier == item.node.identifier {
                 // Carry the PRE ref across, refreshing the re-resolution hints from
                 // the POST node (frame/title/path may have moved) and re-deriving the
                 // owning window id so the identity survives the round-trip.
@@ -204,19 +231,39 @@ public enum DiffEngine {
     /// Returns a POST-path -> PRE-path map of the re-paired nodes. Conservative by
     /// construction:
     ///   - only nodes still UNMATCHED after the positional pass are considered;
-    ///   - the match key is `role` + `title`, and — when BOTH nodes' owning-window
-    ///     ids are known — those must be EQUAL too (the strongest, safest key);
+    ///   - the match key is `role` + `title` + the accessibility LABEL
+    ///     (`description` + `identifier`), and — when BOTH nodes' owning-window ids
+    ///     are known — those must be EQUAL too (the strongest, safest key);
     ///   - the pairing must be MUTUALLY UNIQUE: exactly one unmatched POST node fits
     ///     a given unmatched PRE node on that key, and vice versa. Any ambiguity (two
-    ///     same-role+title candidates on a side) leaves the nodes as remove+add.
+    ///     candidates on a side sharing the whole key) leaves the nodes as
+    ///     remove+add.
     /// The result is order-independent (each POST path is claimed at most once), so
     /// the map is deterministic regardless of dictionary iteration order.
+    ///
+    /// The LABEL in the key is what lets a whole shifted ROW of titleless controls
+    /// be re-paired correctly: each button's `description` is unique among its
+    /// siblings, so every ref lands back on the control it named. Without it, `role`
+    /// + `title` (both identical across the row) would be ambiguous for every one of
+    /// them and the entire row would read as remove+add.
     static func crossPathMatches(
         preRendered: [RenderedNode], postRendered: [RenderedNode],
         isPositionallyMatched: ([Int]) -> Bool,
         preWindowID: ([Int]) -> CGWindowID?, postWindowID: ([Int]) -> CGWindowID?
     ) -> [[Int]: [Int]] {
-        struct MatchKey: Hashable { let role: String; let title: String? }
+        struct MatchKey: Hashable {
+            let role: String
+            let title: String?
+            let description: String?
+            let identifier: String?
+
+            init(_ node: AXNode) {
+                role = node.role
+                title = node.title
+                description = node.description
+                identifier = node.identifier
+            }
+        }
 
         let unmatchedPre = preRendered.filter { !isPositionallyMatched($0.path) }
         let unmatchedPost = postRendered.filter { !isPositionallyMatched($0.path) }
@@ -224,11 +271,11 @@ public enum DiffEngine {
 
         var preByKey: [MatchKey: [RenderedNode]] = [:]
         for item in unmatchedPre {
-            preByKey[MatchKey(role: item.node.role, title: item.node.title), default: []].append(item)
+            preByKey[MatchKey(item.node), default: []].append(item)
         }
         var postByKey: [MatchKey: [RenderedNode]] = [:]
         for item in unmatchedPost {
-            postByKey[MatchKey(role: item.node.role, title: item.node.title), default: []].append(item)
+            postByKey[MatchKey(item.node), default: []].append(item)
         }
 
         var matches: [[Int]: [Int]] = [:]
@@ -279,11 +326,28 @@ public enum DiffEngine {
         return stored == post
     }
 
+    /// Whether two nodes answer to the SAME accessibility label — the identity
+    /// half of the attribute pair `description` + `identifier`, compared verbatim
+    /// (see `AXLabel` for why the `_NS:<n>` filter is not applied to identity).
+    ///
+    /// Named rather than inlined so the positional pass, the cross-path `MatchKey`,
+    /// and the ref-carry guard are visibly the SAME notion of "same name": if one
+    /// of the three admitted a label the others rejected, a ref could still be
+    /// re-homed by the disagreement between two passes.
+    static func labelsMatch(_ a: AXNode, _ b: AXNode) -> Bool {
+        a.description == b.description && a.identifier == b.identifier
+    }
+
     /// Whether two matched nodes render differently — i.e. any attribute the
     /// snapshot surfaces (and the digest hashes) changed: subrole, title, MASKED
     /// value, enabled, frame, or a scroll container's position. Value is compared
     /// through the `SecureField` mask chokepoint, so a secure field's underlying
     /// secret change is (correctly) invisible.
+    ///
+    /// The rendered LABEL (`description`/`identifier`) is absent here on purpose
+    /// and is not a gap: it is IDENTITY, so two nodes only reach this predicate
+    /// once their labels are known equal. A label that differs never produces a
+    /// "changed" line — it produces a remove+add, which is the honest reading.
     static func rendersDifferently(_ a: AXNode, _ b: AXNode) -> Bool {
         a.role != b.role
             || a.subrole != b.subrole

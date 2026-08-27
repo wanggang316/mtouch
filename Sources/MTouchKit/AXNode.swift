@@ -159,10 +159,31 @@ public enum AXLabel {
     ///
     /// Applied by the LABEL slot and by the content predicate — the two places
     /// where a synthetic string would masquerade as meaning. It is deliberately
-    /// NOT applied to criteria matching or to JSON: those surfaces carry the
-    /// attribute verbatim, so a caller who has seen `"_NS:8"` in JSON can still
-    /// match on it. The two risks are not symmetric — a label slot must not show
-    /// a false name, while a criteria substring is explicit and never accidental.
+    /// NOT applied to criteria matching, to JSON, or to REF IDENTITY: those
+    /// surfaces carry the attribute verbatim, so a caller who has seen `"_NS:8"`
+    /// in JSON can still match on it. The two risks are not symmetric — a label
+    /// slot must not show a false name, while a criteria substring is explicit
+    /// and never accidental.
+    ///
+    /// ## Why ref identity uses the RAW identifier (deliberate)
+    /// `NodeHint` / `RefEntry` / the diff engine compare the identifier VERBATIM,
+    /// filter not applied. The reason is that the two surfaces have different
+    /// lifetimes and opposite failure modes:
+    ///   - The instability that disqualifies `_NS:<n>` as a NAME is instability
+    ///     across BUILDS. A ref's identity is only ever compared between a
+    ///     snapshot and a re-walk of the SAME process — a session is pinned to a
+    ///     pid and the act layer refuses to run once that process is gone — so a
+    ///     nib decoding index cannot drift underneath it the way it drifts
+    ///     between releases.
+    ///   - Discarding it costs the only thing that tells two same-role siblings
+    ///     apart when neither has a title, a subrole, or a description. That is
+    ///     not a cosmetic loss: without it a ref carries onto the neighbouring
+    ///     element at a shifted index and the wrong control is pressed SILENTLY.
+    ///   - The two errors are not equally bad. If `_NS:<n>` ever DOES churn
+    ///     in-process, the identity simply fails to match and the ref goes stale
+    ///     (exit 3, "Nothing was acted on"), which is loud and recoverable by
+    ///     re-snapshotting. A discarded identifier fails the other way: silently,
+    ///     onto the wrong element, reported as success.
     public static func usableIdentifier(of node: AXNode) -> String? {
         guard let identifier = node.identifier,
               !identifier.isEmpty,

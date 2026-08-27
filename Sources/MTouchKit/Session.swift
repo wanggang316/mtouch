@@ -43,9 +43,18 @@ public enum RefResolution: Equatable, Sendable {
 /// walk, and omitting the tree keeps the file small and guarantees no node
 /// `value` (a possible secret) is ever written — `RefEntry` carries no value.
 public struct Session: Equatable, Sendable, Codable {
-    /// Schema version, so a future format change can be detected instead of
-    /// silently mis-decoding. Bumped when the persisted shape changes.
-    public static let currentVersion = 1
+    /// Schema version, so a format change is detected instead of silently
+    /// mis-decoding. Bumped when the persisted shape changes.
+    ///
+    /// v2 added the accessibility LABEL (`description` + `identifier`) to
+    /// `RefEntry`/`NodeHint`. The bump is REQUIRED, not hygiene: those keys are
+    /// absent from a v1 file and absence is indistinguishable from "this element
+    /// has no label", so a v1 session would decode as a table of unlabelled refs
+    /// that match any same-role sibling — the very misdelivery the label prevents.
+    /// The store's version gate folds a non-current file into corrupt-as-absent,
+    /// so such a session reads as "no session" (exit 3) and is healed by the next
+    /// `snapshot`.
+    public static let currentVersion = 2
 
     public let version: Int
     /// Bundle id of the app the snapshot was taken from.

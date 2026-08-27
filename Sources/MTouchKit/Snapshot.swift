@@ -134,27 +134,59 @@ public struct Snapshot: Equatable, Sendable {
 }
 
 /// The handle-free identity of ONE node on a ref's ancestor path: the same stable
-/// role/subrole/title triple `ElementRelocation.hintsMatch` trusts for the element
-/// itself. Value-free by construction — only role/subrole/title, never a node
-/// `value` (a possible secret). Ancestor TITLES are fine: they are window/group
-/// captions, not secure-field values.
+/// role/subrole/title/description/identifier tuple `ElementRelocation.hintsMatch`
+/// trusts for the element itself. Value-free by construction — never a node
+/// `value` (a possible secret). Ancestor TITLES and LABELS are fine: they are
+/// window/group captions and developer-set names, not secure-field values.
+///
+/// `description` and `identifier` are the ACCESSIBILITY LABEL, and they are part
+/// of identity for the same reason they are part of the rendered label: a great
+/// many controls have neither a title nor a subrole, so role alone identifies
+/// nothing and any two of them are interchangeable. See `AXLabel` for why the
+/// identifier is compared RAW here while the label slot filters it.
 public struct NodeHint: Equatable, Sendable, Codable {
     public let role: String
     public let subrole: String?
     public let title: String?
+    /// `kAXDescriptionAttribute` — the accessibility label most titleless macOS
+    /// controls answer with, and usually their only distinguishing attribute.
+    public let description: String?
+    /// `kAXIdentifierAttribute`, verbatim (see `AXLabel`): the last identity a
+    /// control with neither title nor description has.
+    public let identifier: String?
 
-    public init(role: String, subrole: String? = nil, title: String? = nil) {
+    public init(
+        role: String, subrole: String? = nil, title: String? = nil,
+        description: String? = nil, identifier: String? = nil
+    ) {
         self.role = role
         self.subrole = subrole
         self.title = title
+        self.description = description
+        self.identifier = identifier
     }
 
     public init(node: AXNode) {
-        self.init(role: node.role, subrole: node.subrole, title: node.title)
+        self.init(
+            role: node.role, subrole: node.subrole, title: node.title,
+            description: node.description, identifier: node.identifier
+        )
     }
 
     public init(attributes: AXAttributes) {
-        self.init(role: attributes.role, subrole: attributes.subrole, title: attributes.title)
+        self.init(
+            role: attributes.role, subrole: attributes.subrole, title: attributes.title,
+            description: attributes.description, identifier: attributes.identifier
+        )
+    }
+
+    /// The identity a ref recorded for its own element, so relocation can compare
+    /// a live element against it with the SAME tuple used for ancestors.
+    public init(entry: RefEntry) {
+        self.init(
+            role: entry.role, subrole: entry.subrole, title: entry.title,
+            description: entry.description, identifier: entry.identifier
+        )
     }
 }
 
@@ -162,13 +194,22 @@ public struct NodeHint: Equatable, Sendable, Codable {
 /// can persist the ref table and, on a later walk, re-locate the element for the
 /// act layer. Deliberately EXCLUDES the node's `value`: a value may be a secret
 /// (secure field), and a value is not needed to re-locate an element — role,
-/// subrole, title, frame, the structural `path`, and the ancestor identity are
-/// the stable hints.
+/// subrole, title, the accessibility LABEL, frame, the structural `path`, and the
+/// ancestor identity are the stable hints.
 public struct RefEntry: Equatable, Sendable, Codable {
     public let ref: String
     public let role: String
     public let subrole: String?
     public let title: String?
+    /// `kAXDescriptionAttribute` — part of the ref's IDENTITY, not decoration. A
+    /// control with no title and no subrole is identified by role alone without
+    /// it, so a ref could survive onto a same-role sibling that merely slid into
+    /// its index; with it, the ref goes stale instead (exit 3) and nothing is
+    /// acted on. Value-free: a description is a name, never a field's contents.
+    public let description: String?
+    /// `kAXIdentifierAttribute`, compared VERBATIM (see `AXLabel` for why ref
+    /// identity does not apply the `_NS:<n>` filter the label slot does).
+    public let identifier: String?
     public let frame: CGRect?
     /// Index path from the snapshot roots to this node — a deterministic,
     /// handle-free breadcrumb the act layer can follow on a fresh walk.
@@ -192,12 +233,15 @@ public struct RefEntry: Equatable, Sendable, Codable {
 
     public init(
         ref: String, role: String, subrole: String?, title: String?,
+        description: String? = nil, identifier: String? = nil,
         frame: CGRect?, path: [Int], ancestors: [NodeHint] = [], ownerWindowID: CGWindowID? = nil
     ) {
         self.ref = ref
         self.role = role
         self.subrole = subrole
         self.title = title
+        self.description = description
+        self.identifier = identifier
         self.frame = frame
         self.path = path
         self.ancestors = ancestors
@@ -210,6 +254,7 @@ public struct RefEntry: Equatable, Sendable, Codable {
     ) {
         self.init(
             ref: ref, role: node.role, subrole: node.subrole, title: node.title,
+            description: node.description, identifier: node.identifier,
             frame: node.frame, path: path, ancestors: ancestors, ownerWindowID: ownerWindowID
         )
     }
@@ -221,24 +266,34 @@ public struct RefEntry: Equatable, Sendable, Codable {
     func withAncestors(_ ancestors: [NodeHint]) -> RefEntry {
         RefEntry(
             ref: ref, role: role, subrole: subrole, title: title,
+            description: description, identifier: identifier,
             frame: frame, path: path, ancestors: ancestors, ownerWindowID: ownerWindowID
         )
     }
 
     private enum CodingKeys: String, CodingKey {
-        case ref, role, subrole, title, frame, path, ancestors, ownerWindowID
+        case ref, role, subrole, title, description, identifier, frame, path, ancestors, ownerWindowID
     }
 
-    /// Tolerant decode: a session written before ancestor identity / the owning
-    /// window id existed simply decodes with an empty chain / nil window id (its
-    /// refs then relocate by ancestor/position alone — safe — while every fresh
-    /// snapshot carries the full identity).
+    /// Tolerant decode: every optional attribute is decoded if present, so an
+    /// element that genuinely has no subrole/label/frame round-trips as nil.
+    ///
+    /// Tolerance alone is NOT the compatibility story for an OLD session file. An
+    /// absent `description` key is indistinguishable from an element that has no
+    /// description, so a pre-label session would decode as "every ref has a nil
+    /// label" and its refs would then match any same-role sibling — exactly the
+    /// silent misdelivery the label identity exists to prevent. `Session.version`
+    /// is what rules that out: the store's version gate rejects any session not
+    /// written by this shape and folds it into corrupt-as-absent, so a stale file
+    /// yields "no session" (exit 3), never a mis-decoded ref.
     public init(from decoder: Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
         ref = try container.decode(String.self, forKey: .ref)
         role = try container.decode(String.self, forKey: .role)
         subrole = try container.decodeIfPresent(String.self, forKey: .subrole)
         title = try container.decodeIfPresent(String.self, forKey: .title)
+        description = try container.decodeIfPresent(String.self, forKey: .description)
+        identifier = try container.decodeIfPresent(String.self, forKey: .identifier)
         frame = try container.decodeIfPresent(CGRect.self, forKey: .frame)
         path = try container.decode([Int].self, forKey: .path)
         ancestors = try container.decodeIfPresent([NodeHint].self, forKey: .ancestors) ?? []

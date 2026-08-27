@@ -167,11 +167,13 @@ public enum ElementRelocation {
     /// The path whose element the ref resolves to, or nil when it can no longer
     /// be found (stale). Strategy:
     ///   1. POSITIONAL: the ref's own path still holds an element whose own hints
-    ///      (role, subrole, title), owning-window id, AND ancestor chain all match
-    ///      — the common case where an unrelated action left the target in place.
-    ///      All must match: a same-hint element now at this path but under a
-    ///      different owning window is an impostor (e.g. a sibling window closed
-    ///      and slid this one into the vacated slot).
+    ///      (role, subrole, title, description, identifier), owning-window id, AND
+    ///      ancestor chain all match — the common case where an unrelated action
+    ///      left the target in place. All must match: a same-hint element now at
+    ///      this path but under a different owning window is an impostor (e.g. a
+    ///      sibling window closed and slid this one into the vacated slot), and a
+    ///      differently-LABELLED element at this path is the ref's neighbour that
+    ///      a sibling insert/removal shifted into place, not the ref's element.
     ///   2. HINT FALLBACK: otherwise, among all elements whose own hints, owning
     ///      window, AND ancestor chain match, resolve iff EXACTLY ONE remains — the
     ///      element merely moved. Zero or multiple matches is ambiguous, so the ref
@@ -220,13 +222,20 @@ public enum ElementRelocation {
 
     /// Whether a live element's hints identify it as the ref's element. Uses the
     /// stable, handle-free identity the diff engine also trusts — role + subrole +
-    /// title. `value` is deliberately excluded (it is not persisted, and it is the
-    /// attribute most likely to change); frame is excluded because a surviving
-    /// element routinely moves.
+    /// title + the accessibility LABEL (`description` + `identifier`). `value` is
+    /// deliberately excluded (it is not persisted, and it is the attribute most
+    /// likely to change); frame is excluded because a surviving element routinely
+    /// moves.
+    ///
+    /// The LABEL is load-bearing, not a refinement. Whole keypads of controls
+    /// report `AXButton` with no subrole and no title, so role/subrole/title alone
+    /// makes every one of them identical: the ref's own path still "matches" after
+    /// a sibling insert or removal shifts the row, and the ref comes to address its
+    /// NEIGHBOUR while reporting success. With the label compared, that candidate
+    /// is rejected — the ref either relocates onto the element that still carries
+    /// the same label, or goes stale (exit 3) and nothing is acted on.
     public static func hintsMatch(_ attributes: AXAttributes, _ entry: RefEntry) -> Bool {
-        attributes.role == entry.role
-            && attributes.subrole == entry.subrole
-            && attributes.title == entry.title
+        NodeHint(attributes: attributes) == NodeHint(entry: entry)
     }
 
     /// Whether the live element at `path` has the SAME ancestor identity the ref
