@@ -26,23 +26,25 @@ AAAAAAABAAAAAQAAAAQAAAABAAAAJHN0c3oAAAAAAAAAAAAAAAQAAAB0AAAAGwAAAB4AAAAbAAAAFHN0
 ACw=
 """
 
-/// Whether THIS host's media stack can actually read a movie container.
+/// Whether to run the tests that exercise the REAL media-container integration.
 ///
-/// A headless CI runner has no decoder available, and every `AVURLAsset` read
-/// there hangs until the verifier's own deadline and comes back `.unreadable`.
-/// That does not merely break the positive case — it quietly HOLLOWS OUT the
-/// negative ones: "not a movie" and "truncated movie" both expect a refusal, and
-/// a blanket timeout refuses everything, so they would keep passing while
-/// asserting nothing. Gate all three on this probe so they either test the real
-/// integration or are visibly skipped, never silently vacuous. The verifier's
-/// classification logic stays covered unconditionally through its `probe:` seam.
-private let hostCanDecodeMovies: Bool = {
-    let url = FileManager.default.temporaryDirectory
-        .appendingPathComponent("mtouch-decode-probe-\(UUID().uuidString).mp4")
-    defer { try? FileManager.default.removeItem(at: url) }
-    guard (try? tinyMovieData().write(to: url)) != nil else { return false }
-    return RecordArtifact.verify(path: url.path).isVerified
-}()
+/// A headless CI runner has no decoder, so loading a valid H.264 movie there
+/// hangs until the verifier's own deadline and returns `.unreadable`. That does
+/// not merely break the positive case — it quietly HOLLOWS OUT the negative
+/// ones: "not a movie" and "truncated movie" both assert a refusal, and a
+/// blanket timeout refuses everything, so they keep passing while asserting
+/// nothing at all.
+///
+/// Detecting this by probing the host was tried and is NOT reliable: on the
+/// runner the first container read returns quickly and a later identical read
+/// hangs, so the probe reports "can decode" and the test then times out anyway.
+/// A flaky gate is worse than an honest one, so key on the environment instead.
+/// These three run on any developer machine and in the live recording check;
+/// they are skipped on CI, which is recorded as an environment-blocked gap
+/// rather than papered over. The verifier's classification logic stays covered
+/// everywhere through its `probe:` seam.
+private let mediaContainerIntegrationEnabled =
+    ProcessInfo.processInfo.environment["CI"] == nil
 
 private func tinyMovieData() -> Data {
     Data(base64Encoded: tinyMovieBase64, options: .ignoreUnknownCharacters) ?? Data()
@@ -85,7 +87,7 @@ private func stubProbe(
     /// Bytes that are not a movie — which is also what a SIGKILLed recorder
     /// leaves, an mdat with no finalized moov — are refused with the parser's
     /// own reason.
-    @Test(.enabled(if: hostCanDecodeMovies)) func bytesThatAreNotAMovieAreRefusedWithAReason() throws {
+    @Test(.enabled(if: mediaContainerIntegrationEnabled)) func bytesThatAreNotAMovieAreRefusedWithAReason() throws {
         try withRecordTempDir { dir in
             let url = dir.appendingPathComponent("notamovie.mp4")
             try Data("this is plainly not a movie container".utf8).write(to: url)
@@ -103,7 +105,7 @@ private func stubProbe(
 
     /// A TRUNCATED movie — the first half of a valid file — must fail too. This
     /// is the case that makes a killed recorder detectable at all.
-    @Test(.enabled(if: hostCanDecodeMovies)) func aTruncatedMovieIsRefused() throws {
+    @Test(.enabled(if: mediaContainerIntegrationEnabled)) func aTruncatedMovieIsRefused() throws {
         try withRecordTempDir { dir in
             let whole = tinyMovieData()
             let url = dir.appendingPathComponent("truncated.mp4")
@@ -112,7 +114,7 @@ private func stubProbe(
         }
     }
 
-    @Test(.enabled(if: hostCanDecodeMovies)) func aRealMovieIsVerifiedWithItsBytesDurationAndTrackCount() throws {
+    @Test(.enabled(if: mediaContainerIntegrationEnabled)) func aRealMovieIsVerifiedWithItsBytesDurationAndTrackCount() throws {
         try withRecordTempDir { dir in
             let url = dir.appendingPathComponent("good.mp4")
             try writeTinyMovie(url)
