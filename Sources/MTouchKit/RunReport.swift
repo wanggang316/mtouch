@@ -162,10 +162,16 @@ public enum RunReportLoader {
         return String(describing: value ?? "")
     }
 
+    /// Only MOVIES get an embed slot. `video/` also holds a recording's control
+    /// file and its log, and rendering those into a `<video>` element would
+    /// produce a player that can never play.
+    static let movieExtensions: Set<String> = ["mp4", "mov", "m4v"]
+
     private static func videoFiles(in bundle: RunBundle) -> [String] {
         let names = (try? FileManager.default.contentsOfDirectory(atPath: bundle.videoDirectory)) ?? []
         return names
             .filter { !$0.hasPrefix(".") }
+            .filter { movieExtensions.contains(URL(fileURLWithPath: $0).pathExtension.lowercased()) }
             .sorted()
             .map { "\(RunBundle.videoDirectoryName)/\($0)" }
     }

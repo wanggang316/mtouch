@@ -211,6 +211,41 @@ private func render(_ root: String, redact: Bool = false) -> String {
         }
     }
 
+    /// A live recording also leaves its control file and its log in `video/`.
+    /// Only MOVIES get an embed slot: a `<video>` element pointed at record.json
+    /// would be a player that can never play.
+    @Test func aRecordingsControlFileAndLogAreNotEmbeddedAsVideos() throws {
+        try withTempDir { dir in
+            let root = dir.appendingPathComponent("run").path
+            let builder = try BundleBuilder(root: root)
+            try builder.writeTrajectory([line(command: "act", step: 1)])
+            try builder.writeVideo(RecordPlan.controlFileName)
+            try builder.writeVideo(RecordPlan.logFileName)
+            try builder.writeVideo("capture.mp4")
+            try builder.writeVideo("capture.MOV")
+
+            let html = render(root)
+            #expect(html.contains("src=\"video/capture.mp4\""))
+            #expect(html.contains("src=\"video/capture.MOV\""))
+            #expect(!html.contains(RecordPlan.controlFileName))
+            #expect(!html.contains(RecordPlan.logFileName))
+        }
+    }
+
+    /// A `video/` holding only a recording's bookkeeping is still "no recording".
+    @Test func aVideoDirectoryWithoutAMovieStatesThatNothingWasRecorded() throws {
+        try withTempDir { dir in
+            let root = dir.appendingPathComponent("run").path
+            let builder = try BundleBuilder(root: root)
+            try builder.writeTrajectory([line(command: "act", step: 1)])
+            try builder.writeVideo(RecordPlan.controlFileName)
+
+            let html = render(root)
+            #expect(html.contains("No screen recording in this run"))
+            #expect(!html.contains("<video"))
+        }
+    }
+
     @Test func aStepWhoseImageIsGoneSaysSoRatherThanRenderingABrokenImage() throws {
         try withTempDir { dir in
             let root = dir.appendingPathComponent("run").path

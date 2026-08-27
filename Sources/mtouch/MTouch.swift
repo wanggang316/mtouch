@@ -16,11 +16,14 @@ struct MTouch: ParsableCommand {
             Wait.self,
             Clipboard.self,
             Screenshot.self,
+            Record.self,
             Report.self,
             MCP.self,
             // DEV-ONLY, hidden from --help (shouldDisplay: false). Not one of the
             // public subcommands; exercises AXTreeWalker against a live app.
             WalkSmoke.self,
+            // DEV-ONLY, hidden. The blocking recorder `record start` spawns.
+            RecordRun.self,
         ]
     )
 
