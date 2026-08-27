@@ -32,6 +32,7 @@ public extension ActPipeline {
         persist: (Snapshot, String, pid_t, String) throws -> Void = { snapshot, app, pid, path in
             try SessionStore.save(snapshot, app: app, pid: pid, to: path)
         },
+        now: () -> TimeInterval = { ProcessInfo.processInfo.systemUptime },
         sleep: (TimeInterval) -> Void = { Thread.sleep(forTimeInterval: $0) }
     ) -> ActOutcome {
         let pid: pid_t
@@ -72,7 +73,7 @@ public extension ActPipeline {
             // longer to appear than an in-place change: use the longer menu settle so
             // the diff reports what the command actually did.
             preSnapshot: preSnapshot, expectsMenu: true, json: json,
-            rewalk: rewalk, persist: persist, sleep: sleep
+            rewalk: rewalk, persist: persist, now: now, sleep: sleep
         ) {
             guard case let .failure(error) = invoke(pid, path) else { return nil }
             // The unreadable-menu-bar case is the one failure the resolver cannot

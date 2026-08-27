@@ -33,6 +33,15 @@ private struct StubPermissions: PermissionProvider {
     var screenRecordingGranted: Bool { false }
 }
 
+/// Deterministic virtual clock shared by `now`/`sleep`, so the settle's timing —
+/// how long it waited, and how long it was allowed to — is asserted with no wall
+/// time at all. Time advances ONLY when the code under test sleeps.
+private final class Clock {
+    private(set) var time: TimeInterval = 0
+    func now() -> TimeInterval { time }
+    func sleep(_ interval: TimeInterval) { time += interval }
+}
+
 private func withTempDir(_ body: (URL) throws -> Void) rethrows {
     let dir = FileManager.default.temporaryDirectory
         .appendingPathComponent("mtouch-act-tests-\(UUID().uuidString)", isDirectory: true)
@@ -205,48 +214,368 @@ private func terminalCode(_ target: ActPipeline.Target) -> MTouchExitCode? {
 // MARK: - Post-action settle (pure, no AX)
 
 @Suite struct ActSettleTests {
-    @Test func settleStopsEarlyOnFirstChange() {
-        // rewalk yields the pre tree twice then a changed tree; the loop must stop
-        // as soon as a change appears (never exhaust the budget) and never sleep
-        // after the winning walk.
-        let pre = Snapshot(roots: [window([button("A")])])
-        let changed = [window([button("A"), button("B")])]
+    /// The pre tree every case below diffs against.
+    private func pre() -> Snapshot { Snapshot(roots: [window([button("A")])]) }
+
+    /// A tree distinguishable from every other `changed(n)` — so "which walk did the
+    /// reported diff come from" is answerable from the diff itself.
+    private func changed(_ label: String) -> [AXNode] {
+        [window([button("A"), button(label)])]
+    }
+
+    /// THE FIX. The first walk after an action routinely catches the interface
+    /// mid-render, so the first NON-EMPTY diff is not the action's effect — measured
+    /// against a real application it reported a half-typed value, and sometimes a
+    /// wholly unrelated element. The settle therefore returns the first reading that
+    /// REPEATS across two consecutive walks, and nothing earlier.
+    @Test func settleReturnsTheFirstReadingThatRepeats() {
+        let clock = Clock()
         var calls = 0
         var sleeps = 0
         let result = ActPipeline.settledDiff(
-            pre: pre, pid: 1, expectsMenu: true,
+            pre: pre(), pid: 1, expectsMenu: false,
             rewalk: { _ in
                 calls += 1
-                return calls < 3 ? walked([window([button("A")])]) : walked(changed)
+                // Two different mid-render readings, then one that holds still.
+                return walked(changed(["B", "C", "D", "D"][min(calls, 4) - 1]))
             },
-            sleep: { _ in sleeps += 1 }
+            now: clock.now,
+            sleep: { clock.sleep($0); sleeps += 1 }
         )
-        #expect(result.diff.added.count == 1)
-        #expect(result.diff.added.first?.ref == "e2")
-        #expect(calls == 3)
-        #expect(sleeps == 2)                    // slept only between the first three walks
+        #expect(result.settled)
+        #expect(calls == 4)                      // stopped at the repeat, not before
+        #expect(sleeps == 3)
+        // The REPEATED reading is what is reported — never "B", the first non-empty
+        // diff, which is exactly what the old loop returned.
+        #expect(result.reading.diff.added.map(\.node.title) == ["D"])
     }
 
-    @Test func settleReturnsNoChangesWhenNothingHappens() {
-        let pre = Snapshot(roots: [window([button("A")])])
+    /// An immediately-stable change costs the minimum a repeat can be observed in —
+    /// two walks and one interval — and not one walk more.
+    @Test func anImmediatelyStableReadingReturnsAtTheSecondWalk() {
+        let clock = Clock()
+        var calls = 0
+        var sleeps = 0
+        let result = ActPipeline.settledDiff(
+            pre: pre(), pid: 1, expectsMenu: false,
+            rewalk: { _ in calls += 1; return walked(changed("B")) },
+            now: clock.now,
+            sleep: { clock.sleep($0); sleeps += 1 }
+        )
+        #expect(result.settled)
+        #expect(calls == 2)
+        #expect(sleeps == 1)
+        #expect(clock.time == SettleBudget.standard.interval)
+        #expect(result.reading.diff.added.count == 1)
+    }
+
+    /// A reading that never holds still cannot be reported as the action's effect.
+    /// The budget expires, the MOST RECENT reading is returned — it is the closest
+    /// thing to the truth, and the snapshot persisted alongside it comes from that
+    /// same walk — and it is marked as not settled.
+    @Test func aReadingThatNeverRepeatsExpiresUnsettledWithTheLatestObservation() {
+        let clock = Clock()
         var calls = 0
         let result = ActPipeline.settledDiff(
-            pre: pre, pid: 1, expectsMenu: false,
-            rewalk: { _ in calls += 1; return walked([window([button("A")])]) },
-            sleep: { _ in }
+            pre: pre(), pid: 1, expectsMenu: false,
+            rewalk: { _ in calls += 1; return walked(changed("v\(calls)")) },
+            now: clock.now, sleep: clock.sleep
         )
-        #expect(result.diff.isEmpty)
-        #expect(calls == 4)                     // non-menu budget
-        #expect(DiffText.render(result.diff) == DiffText.noChangesMarker)
+        #expect(!result.settled)
+        #expect(calls > 2)
+        #expect(result.reading.diff.added.map(\.node.title) == ["v\(calls)"])
+        // Bounded: the whole settle stayed inside its budget, never running on
+        // indefinitely against an interface that never sits still.
+        #expect(clock.time <= SettleBudget.standard.deadline + SettleBudget.standard.interval)
     }
 
-    @Test func settleFallsBackToNoChangesWhenEveryWalkFails() {
-        let pre = Snapshot(roots: [window([button("A")])])
+    /// An EMPTY diff never ends the loop early: "nothing has changed yet" is exactly
+    /// the state a slow sheet or window is in on its way to appearing. The settle
+    /// keeps walking and reports the change once it holds still.
+    @Test func anEmptyReadingKeepsWaitingForALateChange() {
+        let clock = Clock()
+        var calls = 0
         let result = ActPipeline.settledDiff(
-            pre: pre, pid: 1, expectsMenu: false,
-            rewalk: { _ in nil }, sleep: { _ in }
+            pre: pre(), pid: 1, expectsMenu: false,
+            rewalk: { _ in
+                calls += 1
+                return calls <= 5 ? walked([window([button("A")])]) : walked(changed("Late"))
+            },
+            now: clock.now, sleep: clock.sleep
         )
-        #expect(result.diff.isEmpty)
+        #expect(result.settled)
+        #expect(calls == 7)                      // 5 empty, then seen and confirmed
+        #expect(result.reading.diff.added.map(\.node.title) == ["Late"])
+    }
+
+    /// A genuine no-op spends its budget (the change might still be coming) and then
+    /// reports "(no changes)" as a SETTLED fact: every walk agreed the tree still
+    /// equals the pre tree, which is proof rather than a guess.
+    @Test func aGenuineNoOpExpiresSettledWithNoChanges() {
+        let clock = Clock()
+        var calls = 0
+        let result = ActPipeline.settledDiff(
+            pre: pre(), pid: 1, expectsMenu: false,
+            rewalk: { _ in calls += 1; return walked([window([button("A")])]) },
+            now: clock.now, sleep: clock.sleep
+        )
+        #expect(result.settled)
+        #expect(result.reading.diff.isEmpty)
+        #expect(calls > 2)                       // waited rather than answering at once
+        #expect(DiffText.render(result.reading.diff, settled: result.settled)
+            == DiffText.noChangesMarker)
+    }
+
+    /// Every walk timed out, so nothing was observed at all. The fallback reading is
+    /// still "(no changes)", but claiming it SETTLED would be a lie — nothing was
+    /// read to settle.
+    @Test func settleFallsBackToAnUnsettledNoChangesWhenEveryWalkFails() {
+        let clock = Clock()
+        let result = ActPipeline.settledDiff(
+            pre: pre(), pid: 1, expectsMenu: false,
+            rewalk: { _ in nil }, now: clock.now, sleep: clock.sleep
+        )
+        #expect(result.reading.diff.isEmpty)
+        #expect(!result.settled)
+    }
+
+    /// A walk that fails BETWEEN two identical walks observed nothing, so it is not
+    /// evidence of a settled tree: it restarts the quiet window, exactly as it does
+    /// for `wait --stable`.
+    @Test func aFailedWalkRestartsTheQuietWindow() {
+        let clock = Clock()
+        var calls = 0
+        let result = ActPipeline.settledDiff(
+            pre: pre(), pid: 1, expectsMenu: false,
+            rewalk: { _ in
+                calls += 1
+                return calls == 2 ? nil : walked(changed("B"))
+            },
+            now: clock.now, sleep: clock.sleep
+        )
+        #expect(result.settled)
+        // Walk 1 saw it, walk 2 failed (window restarted), walks 3 and 4 agree.
+        #expect(calls == 4)
+    }
+
+    /// A menu-opening verb gets the longer budget, because the `AXMenu` it opens
+    /// only becomes walkable once it reports a real frame.
+    @Test func aMenuVerbSettlesOnTheLongerBudget() {
+        let clock = Clock()
+        var calls = 0
+        _ = ActPipeline.settledDiff(
+            pre: pre(), pid: 1, expectsMenu: true,
+            rewalk: { _ in calls += 1; return walked(changed("v\(calls)")) },
+            now: clock.now, sleep: clock.sleep
+        )
+        #expect(clock.time > SettleBudget.standard.deadline)
+        #expect(clock.time <= SettleBudget.menu.deadline + SettleBudget.menu.interval)
+    }
+
+    /// The quiet window is shorter than the poll interval BY CONSTRUCTION, which is
+    /// what makes the time-based quiescence rule mean "identical on two consecutive
+    /// walks" here rather than "identical for a while".
+    @Test func theQuietWindowIsShorterThanThePollInterval() {
+        #expect(SettleBudget.standard.window < SettleBudget.standard.interval)
+        #expect(SettleBudget.menu.window < SettleBudget.menu.interval)
+    }
+}
+
+// MARK: - Rendering an unsettled reading (stdout + --json)
+
+@Suite struct UnsettledDiffRenderingTests {
+    private func sampleDiff() -> Diff {
+        DiffEngine.diff(
+            pre: Snapshot(roots: [window([button("A")])]),
+            post: [window([button("A"), button("B")])]
+        ).diff
+    }
+
+    @Test func textLeadsWithTheMarkerAndKeepsTheDiffBodyByteIdentical() {
+        let diff = sampleDiff()
+        let settled = DiffText.render(diff)
+        let unsettled = DiffText.render(diff, settled: false)
+
+        #expect(settled == DiffText.render(diff, settled: true))
+        #expect(unsettled == DiffText.unsettledMarker + "\n" + settled)
+        // The marker is parenthesized like "(no changes)", so it can never be read
+        // as one of the +/-/~ diff lines.
+        #expect(DiffText.unsettledMarker.hasPrefix("("))
+        #expect(unsettled.contains("snapshot"))     // says how to get a real reading
+    }
+
+    @Test func anUnsettledNoChangesStillSaysNoChanges() {
+        let empty = Diff(added: [], removed: [], changed: [], staleRefs: [])
+        let rendered = DiffText.render(empty, settled: false)
+        #expect(rendered == DiffText.unsettledMarker + "\n" + DiffText.noChangesMarker)
+    }
+
+    @Test func jsonAddsSettledFalseAndOtherwiseStaysByteIdentical() {
+        let diff = sampleDiff()
+        let settled = DiffJSON.render(diff)
+        let unsettled = DiffJSON.render(diff, settled: false)
+
+        // A settled diff is byte-for-byte what this always emitted: the field's
+        // ABSENCE keeps meaning "the ordinary contract held".
+        #expect(!settled.contains("settled"))
+        #expect(unsettled == String(settled.dropLast()) + ",\"settled\":false}")
+    }
+
+    @Test func theFreeFunctionsForwardTheFlag() {
+        let diff = sampleDiff()
+        #expect(renderDiffText(diff, settled: false) == DiffText.render(diff, settled: false))
+        #expect(renderDiffJSON(diff, settled: false) == DiffJSON.render(diff, settled: false))
+        #expect(renderDiffText(diff) == DiffText.render(diff))
+        #expect(renderDiffJSON(diff) == DiffJSON.render(diff))
+    }
+}
+
+// MARK: - An unsettled reading reaches every surface as its own fact
+
+@Suite struct UnsettledActOutcomeTests {
+    private let app = "com.example.App"
+    private let pid: pid_t = 4242
+
+    private func liveSession() -> Session {
+        Session(snapshot: Snapshot(roots: [window([button("A")])]), app: app, pid: pid)
+    }
+
+    /// A verb whose interface never holds still reports `.actedUnsettled`, not
+    /// `.acted`: the diff is real, but it is not the finished effect, and no
+    /// consumer may reach the payload without learning that.
+    private func runNeverSettling(json: Bool, persist: @escaping (Snapshot) -> Void = { _ in })
+        -> ActOutcome {
+        let clock = Clock()
+        var walks = 0
+        return ActPipeline.runKeyboard(
+            action: .type("hi"), appOverride: nil, json: json,
+            environment: [:],
+            permissions: StubPermissions(accessibility: true),
+            loadSession: { _ in liveSession() },
+            isRunning: { _, _ in true },
+            rewalk: { _ in
+                walks += 1
+                // The pre-walk baseline, then a tree that changes on every read.
+                return walks == 1
+                    ? walked([window([button("A")])])
+                    : walked([window([button("A"), button("v\(walks)")])])
+            },
+            deliver: { _, _ in },
+            persist: { snapshot, _, _, _ in persist(snapshot) },
+            now: clock.now, sleep: clock.sleep
+        )
+    }
+
+    @Test func aVerbWhoseReadingNeverSettlesReportsItOnStdout() {
+        var persisted: Snapshot?
+        let outcome = runNeverSettling(json: false, persist: { persisted = $0 })
+        guard case let .actedUnsettled(rendered) = outcome else {
+            Issue.record("expected an unsettled act, got \(outcome)"); return
+        }
+        #expect(rendered.hasPrefix(DiffText.unsettledMarker))
+        #expect(rendered.contains("+ "))            // the diff it DID read is still there
+        // The session is still written — from the same walk the diff came from — so a
+        // ref an agent reads about is a ref it can act on next.
+        #expect(persisted != nil)
+    }
+
+    @Test func theJSONFormCarriesSettledFalse() throws {
+        let outcome = runNeverSettling(json: true)
+        guard case let .actedUnsettled(rendered) = outcome else {
+            Issue.record("expected an unsettled act, got \(outcome)"); return
+        }
+        let object = try JSONSerialization.jsonObject(with: Data(rendered.utf8)) as? [String: Any]
+        let parsed = try #require(object)
+        #expect(parsed["settled"] as? Bool == false)
+        #expect((parsed["added"] as? [Any])?.isEmpty == false)
+    }
+
+    /// A settled verb is completely unchanged — same case, same bytes, no new field.
+    @Test func aSettledVerbIsUntouched() {
+        let clock = Clock()
+        var walks = 0
+        let outcome = ActPipeline.runKeyboard(
+            action: .type("hi"), appOverride: nil, json: true,
+            environment: [:],
+            permissions: StubPermissions(accessibility: true),
+            loadSession: { _ in liveSession() },
+            isRunning: { _, _ in true },
+            rewalk: { _ in
+                walks += 1
+                return walks == 1
+                    ? walked([window([button("A")])])
+                    : walked([window([button("A"), button("B")])])
+            },
+            deliver: { _, _ in },
+            persist: { _, _, _, _ in },
+            now: clock.now, sleep: clock.sleep
+        )
+        guard case let .acted(rendered) = outcome else {
+            Issue.record("expected a settled act, got \(outcome)"); return
+        }
+        #expect(!rendered.contains("settled"))
+    }
+
+    @Test func theOutcomeMapsToSettledFalseWhileKeepingItsDiff() {
+        let unsettled = ActOutcome.actedUnsettled("~ e1 AXTextArea \"h\"").trajectoryInfo
+        #expect(unsettled.settled == false)
+        // Unlike the unverified/unconfirmed cases, a reading WAS taken, so the diff
+        // is recorded — it is the only evidence there is.
+        #expect(unsettled.diff == "~ e1 AXTextArea \"h\"")
+        // It says nothing about delivery or verification, which are separate facts.
+        #expect(unsettled.verified == nil)
+        #expect(unsettled.deliveryConfirmed == nil)
+
+        // A settled act claims nothing at all.
+        #expect(ActOutcome.acted("~ e1 AXTextArea \"hi\"").trajectoryInfo.settled == nil)
+        #expect(ActOutcome.deliveredUnverified(UnverifiedDelivery.notice).trajectoryInfo.settled == nil)
+    }
+
+    @Test func theRecordCarriesSettledFalseAlongsideTheDiff() throws {
+        let dir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("mtouch-unsettled-tests-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: dir) }
+
+        let trajectory = dir.appendingPathComponent("t.jsonl").path
+        _ = try TrajectoryRecorder.record(
+            command: "act",
+            args: TrajectoryArgs.build(["verb": .string("type"), "text": .string("hi")]),
+            kind: .action,
+            environment: [
+                "MTOUCH_TRAJECTORY": trajectory,
+                "MTOUCH_SESSION": dir.appendingPathComponent("s.json").path,
+            ],
+            operation: { ActOutcome.actedUnsettled("~ e1 AXTextArea \"h\"") },
+            describe: { $0.trajectoryInfo }
+        )
+
+        let content = try String(contentsOf: URL(fileURLWithPath: trajectory), encoding: .utf8)
+        let line = try #require(content.split(separator: "\n").first)
+        let record = try #require(
+            try JSONSerialization.jsonObject(with: Data(line.utf8)) as? [String: Any]
+        )
+        #expect(record["settled"] as? Bool == false)
+        #expect(record["diff"] as? String == "~ e1 AXTextArea \"h\"")
+        // Distinct from the other two honesty fields, which make different claims.
+        #expect(record["verified"] == nil)
+        #expect(record["deliveryConfirmed"] == nil)
+        let outcome = try #require(record["outcome"] as? [String: Any])
+        #expect(outcome["ok"] as? Bool == true)
+        #expect(outcome["exit"] as? Int32 == 0)
+    }
+
+    @Test func theMCPSurfaceMarksItsOwnUnsettledReadingsToo() {
+        let payload = ToolResult(payloads: [.text("~ e1 AXTextArea \"h\"")], isError: false, settled: false)
+        let info = payload.trajectoryInfo(kind: .action)
+        #expect(info.settled == false)
+        #expect(info.diff == "~ e1 AXTextArea \"h\"")   // the reading survives
+        #expect(info.verified == nil)
+
+        // Unchanged for an ordinary action.
+        let settled = ToolResult.text("+ e2 AXButton \"B\"").trajectoryInfo(kind: .action)
+        #expect(settled.settled == nil)
+        #expect(settled.diff == "+ e2 AXButton \"B\"")
     }
 }
 
@@ -546,6 +875,7 @@ private func terminalCode(_ target: ActPipeline.Target) -> MTouchExitCode? {
     @Test func successActsOnTheRelocatedElementAndPersistsTheNewSession() throws {
         try withTempDir { dir in
             let path = try writeSession(sampleSnapshot(), to: dir)
+            let clock = Clock()
             var actedVerb: ActVerb?
             var persisted: Snapshot?
             let outcome = ActPipeline.run(
@@ -558,7 +888,7 @@ private func terminalCode(_ target: ActPipeline.Target) -> MTouchExitCode? {
                 rewalk: { _ in walked([window([button("First"), button("Second"), button("Third")])]) },
                 performAction: { _, verb, _ in actedVerb = verb; return .success(()) },
                 persist: { snapshot, _, _, _ in persisted = snapshot },
-                sleep: { _ in }
+                now: clock.now, sleep: clock.sleep
             )
             guard case .acted = outcome else { Issue.record("expected an acted outcome"); return }
             #expect(actedVerb == .press)                 // acted on the located element

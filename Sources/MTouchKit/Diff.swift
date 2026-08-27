@@ -77,8 +77,14 @@ public struct DiffResult: Equatable, Sendable {
 // MARK: - Convenience entry points
 
 /// Render a diff to compact, marker-prefixed text (free-function form matching
-/// `renderText(_:)`'s style for snapshots).
-public func renderDiffText(_ diff: Diff) -> String { DiffText.render(diff) }
+/// `renderText(_:)`'s style for snapshots). `settled: false` prefixes the
+/// "this reading did not settle" marker (see `SettleBudget`).
+public func renderDiffText(_ diff: Diff, settled: Bool = true) -> String {
+    DiffText.render(diff, settled: settled)
+}
 
 /// Render a diff to byte-stable JSON (added/removed/changed node arrays).
-public func renderDiffJSON(_ diff: Diff) -> String { DiffJSON.render(diff) }
+/// `settled: false` adds the `"settled":false` field.
+public func renderDiffJSON(_ diff: Diff, settled: Bool = true) -> String {
+    DiffJSON.render(diff, settled: settled)
+}

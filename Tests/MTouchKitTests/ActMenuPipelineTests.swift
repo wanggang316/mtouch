@@ -15,6 +15,15 @@ private struct StubPermissions: PermissionProvider {
     var screenRecordingGranted: Bool { false }
 }
 
+/// Deterministic virtual clock shared by the settle's `now`/`sleep` seams, so a
+/// test that reaches the post-action settle spends no wall time in it — the menu
+/// budget is the longest in the codebase.
+private final class Clock {
+    private(set) var time: TimeInterval = 0
+    func now() -> TimeInterval { time }
+    func sleep(_ interval: TimeInterval) { time += interval }
+}
+
 private func window(_ title: String, _ children: [AXNode] = []) -> AXNode {
     AXNode(role: kAXWindowRole, title: title, frame: CGRect(x: 0, y: 0, width: 400, height: 300),
            children: children)
@@ -84,6 +93,7 @@ private func failure(_ outcome: ActOutcome) -> (stderr: String, code: MTouchExit
 @Suite struct ActMenuRunTests {
     @Test func invokesThePathAndRendersTheResultingDiff() {
         let journal = Journal()
+        let clock = Clock()
         let pre = [window("Untitled")]
         let post = [window("Untitled"), window("Untitled 2")]
         var walks = 0
@@ -103,7 +113,7 @@ private func failure(_ outcome: ActOutcome) -> (stderr: String, code: MTouchExit
             },
             invoke: { _, _ in journal.record("invoke"); return .success(()) },
             persist: { _, _, _, _ in journal.record("persist") },
-            sleep: { _ in }
+            now: clock.now, sleep: clock.sleep
         )
 
         guard case let .acted(output) = outcome else {
@@ -205,6 +215,7 @@ private func failure(_ outcome: ActOutcome) -> (stderr: String, code: MTouchExit
     }
 
     @Test func anExplicitAppTargetsThatApplicationWithoutASession() {
+        let clock = Clock()
         var invokedPID: pid_t?
         let post = [window("Untitled")]
         let outcome = ActPipeline.runMenu(
@@ -218,7 +229,7 @@ private func failure(_ outcome: ActOutcome) -> (stderr: String, code: MTouchExit
             rewalk: { _ in walked(post) },
             invoke: { pid, _ in invokedPID = pid; return .success(()) },
             persist: { _, _, _, _ in },
-            sleep: { _ in }
+            now: clock.now, sleep: clock.sleep
         )
 
         #expect(invokedPID == 77)

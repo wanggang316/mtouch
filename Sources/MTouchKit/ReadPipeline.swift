@@ -315,7 +315,8 @@ public enum ReadPipeline {
     /// silently become an empty read.
     private static func fromAct(_ outcome: ActOutcome) -> ReadOutcome {
         switch outcome {
-        case let .acted(output), let .deliveredUnverified(output), let .deliveredUnconfirmed(output):
+        case let .acted(output), let .actedUnsettled(output),
+             let .deliveredUnverified(output), let .deliveredUnconfirmed(output):
             return .read(output)
         case let .failed(stderr, code): return .failed(stderr: stderr, code: code)
         }

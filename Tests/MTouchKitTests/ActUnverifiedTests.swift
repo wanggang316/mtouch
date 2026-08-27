@@ -31,6 +31,14 @@ private struct StubPermissions: PermissionProvider {
     var screenRecordingGranted: Bool { false }
 }
 
+/// Deterministic virtual clock shared by the settle's `now`/`sleep` seams, so a
+/// test that reaches the post-action settle spends no wall time in it.
+private final class Clock {
+    private(set) var time: TimeInterval = 0
+    func now() -> TimeInterval { time }
+    func sleep(_ interval: TimeInterval) { time += interval }
+}
+
 private func session(for roots: [AXNode], app: String = testApp, pid: pid_t = testPID) -> Session {
     Session(snapshot: Snapshot(roots: roots), app: app, pid: pid)
 }
@@ -148,6 +156,7 @@ private func failure(_ outcome: ActOutcome) -> (stderr: String, code: MTouchExit
             rewalk: { walker.walk($0) },
             deliver: { try recorder.deliver($0, $1) },
             persist: { _, _, _, _ in persisted += 1 },
+            now: { Issue.record("a no-verify delivery must not consult the clock"); return 0 },
             sleep: { _ in Issue.record("a no-verify delivery must not settle") }
         )
 
@@ -285,6 +294,7 @@ private func failure(_ outcome: ActOutcome) -> (stderr: String, code: MTouchExit
     @Test func withoutTheFlagBothWalksStillHappenAndADiffIsReported() {
         let pre = [window([textArea("")])]
         let post = [window([textArea("hello")])]
+        let clock = Clock()
         var walks = 0
         let recorder = KeyRecorder()
         var persisted = 0
@@ -301,7 +311,7 @@ private func failure(_ outcome: ActOutcome) -> (stderr: String, code: MTouchExit
             },
             deliver: { try recorder.deliver($0, $1) },
             persist: { _, _, _, _ in persisted += 1 },
-            sleep: { _ in }
+            now: clock.now, sleep: clock.sleep
         )
 
         guard case let .acted(rendered) = outcome else { Issue.record("expected a verified act"); return }
@@ -328,6 +338,7 @@ private func failure(_ outcome: ActOutcome) -> (stderr: String, code: MTouchExit
             rewalk: { walker.walk($0) },
             deliver: { try recorder.deliver($0, $1) },
             persist: { _, _, _, _ in Issue.record("must not persist") },
+            now: { Issue.record("a no-verify delivery must not consult the clock"); return 0 },
             sleep: { _ in Issue.record("a no-verify delivery must not settle") }
         )
 

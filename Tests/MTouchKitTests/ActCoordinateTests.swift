@@ -35,6 +35,14 @@ private struct StubPermissions: PermissionProvider {
     var screenRecordingGranted: Bool { false }
 }
 
+/// Deterministic virtual clock shared by the settle's `now`/`sleep` seams, so a
+/// test that reaches the post-action settle spends no wall time in it.
+private final class Clock {
+    private(set) var time: TimeInterval = 0
+    func now() -> TimeInterval { time }
+    func sleep(_ interval: TimeInterval) { time += interval }
+}
+
 private func session(for roots: [AXNode], app: String = testApp, pid: pid_t = testPID) -> Session {
     Session(snapshot: Snapshot(roots: roots), app: app, pid: pid)
 }
@@ -293,6 +301,7 @@ private struct DeliveryBoom: Error {}
     @Test func clickSurfacingAChangeRendersDiffAndPersists() {
         let pre = [window([textArea("")])]
         let post = [window([textArea(""), button("Paste")])] // some observable change
+        let clock = Clock()
         var walks = 0
         let recorder = PointerRecorder()
         var persisted: Snapshot?
@@ -310,7 +319,7 @@ private struct DeliveryBoom: Error {}
             },
             deliver: { try recorder.deliver($0, $1) },
             persist: { snapshot, _, _, _ in persisted = snapshot },
-            sleep: { _ in }
+            now: clock.now, sleep: clock.sleep
         )
 
         guard case let .acted(rendered) = outcome else { Issue.record("expected an acted outcome"); return }
@@ -322,6 +331,7 @@ private struct DeliveryBoom: Error {}
 
     @Test func noEffectClickIsNoChangesExit0() {
         let pre = [window([textArea("")])]
+        let clock = Clock()
         let recorder = PointerRecorder()
         let outcome = ActPipeline.runCoordinate(
             action: .click(ScreenPoint(x: 150, y: 100)), appOverride: nil, json: false,
@@ -332,14 +342,17 @@ private struct DeliveryBoom: Error {}
             onScreen: { _ in true },
             rewalk: { _ in walked(pre) }, // nothing changed
             deliver: { try recorder.deliver($0, $1) },
-            persist: { _, _, _, _ in }, sleep: { _ in }
+            persist: { _, _, _, _ in }, now: clock.now, sleep: clock.sleep
         )
+        // Every walk agreed the tree still equals the pre tree, so "(no changes)" is
+        // a SETTLED reading — `.acted`, not `.actedUnsettled`.
         #expect(outcome == .acted(DiffText.noChangesMarker))
         #expect(recorder.actions.count == 1)
     }
 
     @Test func appOverrideWithNoSessionDeliversTheGesture() {
         let post = [window([textArea("x")])]
+        let clock = Clock()
         var walks = 0
         let recorder = PointerRecorder()
         let outcome = ActPipeline.runCoordinate(
@@ -352,7 +365,7 @@ private struct DeliveryBoom: Error {}
             onScreen: { _ in true },
             rewalk: { _ in walks += 1; return walked(post) },
             deliver: { try recorder.deliver($0, $1) },
-            persist: { _, _, _, _ in }, sleep: { _ in }
+            persist: { _, _, _, _ in }, now: clock.now, sleep: clock.sleep
         )
         guard case .acted = outcome else { Issue.record("expected an acted outcome"); return }
         #expect(recorder.actions.first == .scroll(at: ScreenPoint(x: 20, y: 20), dy: 300))

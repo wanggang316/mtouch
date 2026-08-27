@@ -31,6 +31,14 @@ private struct StubPermissions: PermissionProvider {
     var screenRecordingGranted: Bool { false }
 }
 
+/// Deterministic virtual clock shared by the settle's `now`/`sleep` seams, so a
+/// test that reaches the post-action settle spends no wall time in it.
+private final class Clock {
+    private(set) var time: TimeInterval = 0
+    func now() -> TimeInterval { time }
+    func sleep(_ interval: TimeInterval) { time += interval }
+}
+
 /// A session whose refs number the given pre tree (so a survivor keeps its ref).
 private func session(for roots: [AXNode], app: String = testApp, pid: pid_t = testPID) -> Session {
     Session(snapshot: Snapshot(roots: roots), app: app, pid: pid)
@@ -62,7 +70,9 @@ private final class DeliveryRecorder {
             rewalk: { _ in Issue.record("empty type must not walk"); return nil },
             deliver: { try recorder.deliver($0, $1) },
             persist: { _, _, _, _ in Issue.record("empty type must not persist") },
-            sleep: { _ in }
+            // Zero events means nothing to settle: the clock is never even read.
+            now: { Issue.record("empty type must not consult the clock"); return 0 },
+            sleep: { _ in Issue.record("empty type must not wait") }
         )
         #expect(outcome == .acted(DiffText.noChangesMarker))
         #expect(recorder.actions.isEmpty)
@@ -233,6 +243,7 @@ private final class DeliveryRecorder {
     @Test func typingSurfacesAChangedDiffKeepingTheFocusedElementRef() {
         let pre = [window([textArea("")])]
         let post = [window([textArea("hello world")])]
+        let clock = Clock()
         var walks = 0
         let recorder = DeliveryRecorder()
         var persisted: Snapshot?
@@ -249,7 +260,7 @@ private final class DeliveryRecorder {
             },
             deliver: { try recorder.deliver($0, $1) },
             persist: { snapshot, _, _, _ in persisted = snapshot },
-            sleep: { _ in }
+            now: clock.now, sleep: clock.sleep
         )
 
         guard case let .acted(rendered) = outcome else { Issue.record("expected an acted outcome"); return }
@@ -265,6 +276,7 @@ private final class DeliveryRecorder {
     }
 
     @Test func keyComboIsDeliveredThroughTheSamePath() {
+        let clock = Clock()
         let recorder = DeliveryRecorder()
         let combo = try? KeyCombo(parsing: "cmd+a")
         let outcome = ActPipeline.runKeyboard(
@@ -275,7 +287,7 @@ private final class DeliveryRecorder {
             isRunning: { _, _ in true },
             rewalk: { _ in walked([window([textArea("x")])]) }, // selection invisible to AX value
             deliver: { try recorder.deliver($0, $1) },
-            persist: { _, _, _, _ in }, sleep: { _ in }
+            persist: { _, _, _, _ in }, now: clock.now, sleep: clock.sleep
         )
         guard case .acted = outcome else { Issue.record("expected an acted outcome"); return }
         #expect(recorder.actions.count == 1)

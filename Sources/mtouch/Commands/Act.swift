@@ -84,9 +84,15 @@ struct RefActionArguments: ParsableArguments {
 /// also exits 0. The events went out, so a non-zero exit would invite a retry that
 /// delivers them a second time; the distinguishing evidence is the payload (and the
 /// trajectory's `deliveryConfirmed` field), not the exit code.
+///
+/// `.actedUnsettled` prints the diff it did manage to read, led by the marker that
+/// says the interface had not stopped changing. Exit 0 for the same reason: the
+/// action itself succeeded, and the distinguishing evidence is the payload (and the
+/// trajectory's `settled` field).
 func report(_ outcome: ActOutcome) throws {
     switch outcome {
-    case let .acted(output), let .deliveredUnverified(output), let .deliveredUnconfirmed(output):
+    case let .acted(output), let .actedUnsettled(output),
+         let .deliveredUnverified(output), let .deliveredUnconfirmed(output):
         print(output)
     case let .failed(stderr, code):
         FileHandle.standardError.write(Data((stderr + "\n").utf8))

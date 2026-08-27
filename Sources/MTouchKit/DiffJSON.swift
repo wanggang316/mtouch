@@ -8,11 +8,16 @@
 /// descendant that also changed is its own entry). A no-change diff renders the
 /// same object with three EMPTY arrays — explicit, never blank, never a tree.
 public enum DiffJSON {
-    public static func render(_ diff: Diff) -> String {
+    /// Render `diff`. `settled: false` adds a trailing `"settled":false` — present
+    /// only when it is false, exactly like the trajectory's `verified` and
+    /// `deliveryConfirmed`, so a settled diff stays byte-identical to what this
+    /// always emitted and its ABSENCE keeps meaning "the ordinary contract held".
+    public static func render(_ diff: Diff, settled: Bool = true) -> String {
         let added = diff.added.map(object(_:)).joined(separator: ",")
         let removed = diff.removed.map(object(_:)).joined(separator: ",")
         let changed = diff.changed.map(object(_:)).joined(separator: ",")
-        return "{\"added\":[\(added)],\"removed\":[\(removed)],\"changed\":[\(changed)]}"
+        let unsettled = settled ? "" : ",\"settled\":false"
+        return "{\"added\":[\(added)],\"removed\":[\(removed)],\"changed\":[\(changed)]\(unsettled)}"
     }
 
     /// One diff node object, reusing the snapshot's per-node field grammar and

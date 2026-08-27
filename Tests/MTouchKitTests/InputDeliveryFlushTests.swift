@@ -465,6 +465,14 @@ private func liveSession() -> Session {
     Session(snapshot: Snapshot(roots: liveTree), app: "com.example.App", pid: 4242)
 }
 
+/// Deterministic virtual clock for the post-action settle's `now`/`sleep` seams,
+/// so a test that reaches the settle spends no wall time in it.
+private final class SettleClock {
+    private(set) var time: TimeInterval = 0
+    func now() -> TimeInterval { time }
+    func sleep(_ interval: TimeInterval) { time += interval }
+}
+
 /// Counts walks so "the post-action walk was skipped" is asserted against the seam.
 private final class WalkCounter {
     private(set) var calls = 0
@@ -574,6 +582,7 @@ private final class WalkCounter {
     @Test func aConfirmedVerifiedDeliveryStillWalksDiffsAndPersists() {
         let pre = [window([textArea("")])]
         let post = [window([textArea("hello")])]
+        let clock = SettleClock()
         var walks = 0
         var persisted = 0
 
@@ -588,7 +597,7 @@ private final class WalkCounter {
             },
             deliver: { _, _ in },
             persist: { _, _, _, _ in persisted += 1 },
-            sleep: { _ in }
+            now: clock.now, sleep: clock.sleep
         )
 
         guard case let .acted(rendered) = outcome else { Issue.record("expected a verified act"); return }

@@ -9,8 +9,22 @@ import Foundation
 /// diagnostic to stderr and exits with `code`. A failure NEVER carries stdout, so
 /// an error keeps stdout empty (never a hybrid).
 public enum ActOutcome: Equatable, Sendable {
-    /// The rendered diff (text or JSON) to write to stdout; exit 0.
+    /// The rendered diff (text or JSON) to write to stdout; exit 0. The diff was
+    /// SETTLED: the tree was identical on two consecutive post-action walks, so the
+    /// change it reports is the application's finished response, not a frame of it.
     case acted(String)
+    /// The post-action diff was taken, but it never stopped changing before the
+    /// settle budget expired (see `SettleBudget`). The payload is the best — most
+    /// recent — reading, rendered with the "did not settle" marker; exit 0, because
+    /// the action itself succeeded and re-running it would apply it twice.
+    ///
+    /// A case of its own rather than an `.acted` variant, for the same reason
+    /// `.deliveredUnverified` is: a partial diff read as a settled one is WORSE than
+    /// no diff at all. An agent that sees "nothing changed" after a successful
+    /// action retries it; one that sees half a value believes the application is in
+    /// a state it is not in. No consumer may reach the payload without also seeing
+    /// that the reading is provisional.
+    case actedUnsettled(String)
     /// Input was delivered under `--no-verify`: no walk was taken before or after
     /// it, so there is NO diff. The payload is the rendered "nothing was verified"
     /// notice, written to stdout where a diff would go; exit 0.
@@ -143,6 +157,7 @@ public enum ActPipeline {
         persist: (Snapshot, String, pid_t, String) throws -> Void = { snapshot, app, pid, path in
             try SessionStore.save(snapshot, app: app, pid: pid, to: path)
         },
+        now: () -> TimeInterval = { ProcessInfo.processInfo.systemUptime },
         sleep: (TimeInterval) -> Void = { Thread.sleep(forTimeInterval: $0) }
     ) -> ActOutcome {
         let entry: RefEntry
@@ -197,7 +212,7 @@ public enum ActPipeline {
         return runInputVerb(
             pid: pid, app: app, sessionPath: sessionPath,
             preSnapshot: preSnapshot, expectsMenu: expectsMenu, json: json,
-            rewalk: rewalk, persist: persist, sleep: sleep
+            rewalk: rewalk, persist: persist, now: now, sleep: sleep
         ) {
             // Perform the action. An honest AX refusal (disabled control,
             // non-settable value, non-focusable element) is exit 1 with no diff.
@@ -363,6 +378,7 @@ public enum ActPipeline {
         persist: (Snapshot, String, pid_t, String) throws -> Void = { snapshot, app, pid, path in
             try SessionStore.save(snapshot, app: app, pid: pid, to: path)
         },
+        now: () -> TimeInterval = { ProcessInfo.processInfo.systemUptime },
         sleep: (TimeInterval) -> Void = { Thread.sleep(forTimeInterval: $0) }
     ) -> ActOutcome {
         if case let .type(text) = action, text.isEmpty {
@@ -432,7 +448,7 @@ public enum ActPipeline {
         return runInputVerb(
             pid: pid, app: app, sessionPath: sessionPath,
             preSnapshot: preSnapshot, expectsMenu: false, json: json,
-            rewalk: rewalk, persist: persist, sleep: sleep,
+            rewalk: rewalk, persist: persist, now: now, sleep: sleep,
             act: deliverKeystrokes
         )
     }
@@ -469,6 +485,7 @@ public enum ActPipeline {
         persist: (Snapshot, String, pid_t, String) throws -> Void = { snapshot, app, pid, path in
             try SessionStore.save(snapshot, app: app, pid: pid, to: path)
         },
+        now: () -> TimeInterval = { ProcessInfo.processInfo.systemUptime },
         sleep: (TimeInterval) -> Void = { Thread.sleep(forTimeInterval: $0) }
     ) -> ActOutcome {
         let pid: pid_t
@@ -538,7 +555,7 @@ public enum ActPipeline {
         return runInputVerb(
             pid: pid, app: app, sessionPath: sessionPath,
             preSnapshot: preSnapshot, expectsMenu: action.opensMenu, json: json,
-            rewalk: rewalk, persist: persist, sleep: sleep,
+            rewalk: rewalk, persist: persist, now: now, sleep: sleep,
             act: deliverGesture
         )
     }
@@ -571,65 +588,103 @@ public enum ActPipeline {
         json: Bool,
         rewalk: (pid_t) -> WalkResult?,
         persist: (Snapshot, String, pid_t, String) throws -> Void,
+        now: () -> TimeInterval,
         sleep: (TimeInterval) -> Void,
         act: () -> ActOutcome?
     ) -> ActOutcome {
         if let terminal = act() { return terminal }
 
-        // Bounded re-walk until the change appears, diff against the pre tree,
+        // Bounded re-walk until the reading is STABLE, diff against the pre tree,
         // persist the new session, then render.
-        let result = settledDiff(
-            pre: preSnapshot, pid: pid, expectsMenu: expectsMenu, rewalk: rewalk, sleep: sleep
+        let settle = settledDiff(
+            pre: preSnapshot, pid: pid, expectsMenu: expectsMenu, rewalk: rewalk, now: now, sleep: sleep
         )
 
         // Persist the new session BEFORE printing act-able refs: an unwritable path
         // is a failure (exit 1 naming it); we never advertise refs we could not save.
+        // The persisted snapshot comes from the SAME walk as the reported diff, so a
+        // ref an agent reads about is a ref it can act on.
         do {
-            try persist(result.newSnapshot, app, pid, sessionPath)
+            try persist(settle.reading.newSnapshot, app, pid, sessionPath)
         } catch {
             return .failed(stderr: saveDiagnostic(error, path: sessionPath), code: .runtimeFailure)
         }
 
-        let rendered = json ? renderDiffJSON(result.diff) : renderDiffText(result.diff)
-        return .acted(rendered)
+        let rendered = json
+            ? renderDiffJSON(settle.reading.diff, settled: settle.settled)
+            : renderDiffText(settle.reading.diff, settled: settle.settled)
+        return settle.settled ? .acted(rendered) : .actedUnsettled(rendered)
     }
 
     // MARK: - Post-action settle
 
-    /// Re-walk and diff until the action's effect is visible or the budget is
-    /// spent, returning the last `DiffResult` (an empty diff ⇒ "(no changes)").
-    /// A menu-opening action needs a bounded settle because the opened `AXMenu`
-    /// only becomes walkable once it reports a real frame (M1 menu-collapse gates
-    /// on frame); every attempt RE-WALKS — this is never a sleep-only wait — and
-    /// the loop stops the instant a change appears, so a genuine no-op returns
-    /// promptly instead of exhausting the budget.
+    /// Re-walk and diff until the action's effect has STOPPED CHANGING, or the
+    /// budget is spent.
+    ///
+    /// Returning the first NON-EMPTY diff — which is what this used to do — reads a
+    /// UI mid-render and reports it as the action's effect. Measured over repeated
+    /// identical runs against a real application, that surfaced diffs holding only
+    /// the first character of a typed string, and diffs holding no trace of the
+    /// typed text at all (one showed nothing but an unrelated toolbar element, i.e.
+    /// it read as "nothing was typed" when text HAD been typed). A wrong diff is
+    /// worse than no diff: it is the evidence an agent decides its next action from.
+    ///
+    /// So the loop settles on a reading that REPEATS instead. Each walk's tree is
+    /// digested with the same `WaitDigest` helper `wait --stable` uses and folded
+    /// into a `QuiescenceTracker` whose quiet window is shorter than the poll
+    /// interval — so "quiet" means the digest was identical on two consecutive
+    /// walks. Because the PRE tree is fixed, an unchanged post tree is an unchanged
+    /// diff, which is the property that actually matters here.
+    ///
+    /// Three rules make the loop terminate honestly:
+    ///   - It returns EARLY only on a stable, non-empty reading. An empty diff never
+    ///     ends the loop, because "nothing has changed yet" is exactly the state a
+    ///     slow menu, sheet, or window is in on its way to appearing.
+    ///   - It is bounded by `SettleBudget.deadline` on the monotonic clock, so a UI
+    ///     that never sits still (an animation, a spinner) costs a bounded amount of
+    ///     time rather than blocking.
+    ///   - On expiry it returns the most recent reading — the closest thing to the
+    ///     truth it has, and the one whose snapshot is persisted — and says whether
+    ///     that reading had settled. An all-empty run expires SETTLED: every walk
+    ///     agreed the tree still equals the pre tree, which is a proven "(no
+    ///     changes)", not a guess.
+    ///
+    /// A failed walk (the bounded walk timed out) observes nothing, so it is not
+    /// evidence of a settled tree: it clears the quiet window, exactly as it does
+    /// for `wait --stable`.
     static func settledDiff(
         pre: Snapshot,
         pid: pid_t,
         expectsMenu: Bool,
         rewalk: (pid_t) -> WalkResult?,
+        now: () -> TimeInterval,
         sleep: (TimeInterval) -> Void
-    ) -> DiffResult {
-        let maxAttempts = expectsMenu ? 10 : 4
-        let interval: TimeInterval = expectsMenu ? 0.4 : 0.12
+    ) -> SettleResult {
+        let budget = SettleBudget.forVerb(expectsMenu: expectsMenu)
+        var tracker = QuiescenceTracker(window: budget.window)
 
-        // Baseline: identical-to-pre ⇒ "(no changes)" if every re-walk fails.
-        var last = DiffEngine.diff(pre: pre, post: pre.roots)
-        for attempt in 0..<maxAttempts {
-            if let result = rewalk(pid) {
-                // Thread the post walk's per-root window ids so the reconcile can
-                // detect a ref whose owning window vanished/changed and let it go
-                // stale instead of re-homing it onto a same-hint impostor.
-                last = DiffEngine.diff(
-                    pre: pre,
-                    post: ScrollEnrichment.enrich(result.nodes),
-                    postWindowIDsByPath: result.windowIDsByPath
-                )
-                if !last.diff.isEmpty { return last }
+        // Baseline: identical-to-pre ⇒ "(no changes)" if every re-walk fails. It is
+        // never `settled` on its own — nothing was read, so nothing was established.
+        var reading = DiffEngine.diff(pre: pre, post: pre.roots)
+        var stable = false
+
+        _ = WaitPoll.poll(
+            timeout: budget.deadline, interval: budget.interval, now: now, sleep: sleep
+        ) {
+            guard let walk = rewalk(pid) else {
+                stable = tracker.observe(digest: nil, at: now())
+                return false
             }
-            if attempt < maxAttempts - 1 { sleep(interval) }
+            // Thread the post walk's per-root window ids so the reconcile can detect
+            // a ref whose owning window vanished/changed and let it go stale instead
+            // of re-homing it onto a same-hint impostor.
+            let post = ScrollEnrichment.enrich(walk.nodes)
+            reading = DiffEngine.diff(pre: pre, post: post, postWindowIDsByPath: walk.windowIDsByPath)
+            stable = tracker.observe(digest: WaitDigest.digest(of: post, scopedTo: nil), at: now())
+            return stable && !reading.diff.isEmpty
         }
-        return last
+
+        return SettleResult(reading: reading, settled: stable)
     }
 
     // MARK: - Diagnostics (all name the ref/app; ref errors advise a re-snapshot)

@@ -12,7 +12,25 @@ public enum DiffText {
     /// and never a full tree.
     public static let noChangesMarker = "(no changes)"
 
-    public static func render(_ diff: Diff) -> String {
+    /// Emitted ABOVE the diff when the post-action settle expired before the UI
+    /// stopped changing (see `SettleBudget`). It leads, rather than trails, so an
+    /// agent reading the first line of the output cannot act on a provisional diff
+    /// without knowing it is one — and, like `noChangesMarker`, it is parenthesized
+    /// and prefix-free, so it can never be mistaken for a `+`/`-`/`~` diff line.
+    public static let unsettledMarker =
+        "(unsettled) the interface was still changing when the settle budget expired, so this diff may be "
+            + "partial or may describe a state the application has already moved past — "
+            + "run 'mtouch snapshot' to read the current state"
+
+    /// Render `diff`. `settled: false` prefixes the honesty marker; the diff body
+    /// itself is byte-identical either way, so a consumer that already parses diffs
+    /// keeps parsing them.
+    public static func render(_ diff: Diff, settled: Bool = true) -> String {
+        let body = renderBody(diff)
+        return settled ? body : unsettledMarker + "\n" + body
+    }
+
+    private static func renderBody(_ diff: Diff) -> String {
         guard !diff.isEmpty else { return noChangesMarker }
 
         // Fixed section order (+ then - then ~), each in the engine's traversal

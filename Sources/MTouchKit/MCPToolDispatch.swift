@@ -92,11 +92,23 @@ public struct ToolResult: Equatable, Sendable {
     /// confirmed. A field rather than a payload convention, because a recorder must
     /// not have to pattern-match prose to learn it.
     public let deliveryConfirmed: Bool?
+    /// `false` when the tool produced a post-action diff that never stopped
+    /// changing within the settle budget (see `SettleBudget`). nil means the reading
+    /// settled, or the tool produces no diff at all. Like `deliveryConfirmed`, it is
+    /// a field rather than a payload convention: a recorder must not have to
+    /// pattern-match prose to learn that a diff is provisional.
+    public let settled: Bool?
 
-    public init(payloads: [ToolPayload], isError: Bool, deliveryConfirmed: Bool? = nil) {
+    public init(
+        payloads: [ToolPayload],
+        isError: Bool,
+        deliveryConfirmed: Bool? = nil,
+        settled: Bool? = nil
+    ) {
         self.payloads = payloads
         self.isError = isError
         self.deliveryConfirmed = deliveryConfirmed
+        self.settled = settled
     }
 
     /// A single-text result (the common case).
@@ -388,10 +400,15 @@ public enum MCPToolDispatch {
     /// An UNCONFIRMED delivery cannot be read off the request the way `noVerify`
     /// can — the client did not ask for it, the window server caused it — so the
     /// result carries the fact on `deliveryConfirmed` for the recorder to pick up.
+    /// An UNSETTLED diff is the same shape of fact and travels the same way, on
+    /// `settled`; its payload is the diff itself, already carrying the marker the
+    /// CLI prints, so the two surfaces stay byte-identical.
     private static func fromAct(_ outcome: ActOutcome) -> ToolResult {
         switch outcome {
         case let .acted(output), let .deliveredUnverified(output):
             return .text(output)
+        case let .actedUnsettled(output):
+            return ToolResult(payloads: [.text(output)], isError: false, settled: false)
         case let .deliveredUnconfirmed(output):
             return ToolResult(payloads: [.text(output)], isError: false, deliveryConfirmed: false)
         case let .failed(stderr, _):

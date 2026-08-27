@@ -319,6 +319,14 @@ private func diff(_ pre: [AXNode], _ post: [AXNode]) -> DiffResult {
 // the surface an agent actually sees: which element got pressed, or exit 3 with
 // nothing acted on.
 
+/// Deterministic virtual clock for the post-action settle's `now`/`sleep` seams,
+/// so a test that reaches the settle spends no wall time in it.
+private final class SettleClock {
+    private(set) var time: TimeInterval = 0
+    func now() -> TimeInterval { time }
+    func sleep(_ interval: TimeInterval) { time += interval }
+}
+
 @Suite struct RefLabelActPipelineTests {
     /// The pid a sentinel handle is created with, used purely as a per-path marker
     /// so the test can tell WHICH element was pressed.
@@ -367,6 +375,7 @@ private func diff(_ pre: [AXNode], _ post: [AXNode]) -> DiffResult {
         try withSession(snapshotted) { sessionPath in
             // At act time the pane is gone: "1" is now at [0,0], "2" at [0,1].
             let afterShift = [keypadWindow([describedKey("1"), describedKey("2"), describedKey("3")])]
+            let clock = SettleClock()
             var pressedMarker: pid_t = 0
             let outcome = ActPipeline.run(
                 ref: "e1", verb: .press, value: nil, json: false,
@@ -384,7 +393,7 @@ private func diff(_ pre: [AXNode], _ post: [AXNode]) -> DiffResult {
                     return .success(())
                 },
                 persist: { _, _, _, _ in },
-                sleep: { _ in }
+                now: clock.now, sleep: clock.sleep
             )
 
             guard case .acted = outcome else {

@@ -96,6 +96,12 @@ public struct TrajectoryOutcomeInfo: Sendable, Equatable {
     /// unchecked, this says the DELIVERY did. nil means the question does not
     /// arise — nothing was posted, or the posted events were confirmed.
     public let deliveryConfirmed: Bool?
+    /// `false` when the action's post-action diff was taken but never stopped
+    /// changing before the settle budget expired (see `SettleBudget`). Unlike the
+    /// two fields above, the record still carries its `diff`: there IS a reading,
+    /// it is simply provisional. nil means the reading settled, or the record is
+    /// not an action at all.
+    public let settled: Bool?
 
     public init(
         ok: Bool,
@@ -104,7 +110,8 @@ public struct TrajectoryOutcomeInfo: Sendable, Equatable {
         diff: String? = nil,
         screenshotPath: String? = nil,
         verified: Bool? = nil,
-        deliveryConfirmed: Bool? = nil
+        deliveryConfirmed: Bool? = nil,
+        settled: Bool? = nil
     ) {
         self.ok = ok
         self.exit = exit
@@ -113,6 +120,7 @@ public struct TrajectoryOutcomeInfo: Sendable, Equatable {
         self.screenshotPath = screenshotPath
         self.verified = verified
         self.deliveryConfirmed = deliveryConfirmed
+        self.settled = settled
     }
 }
 
@@ -152,6 +160,12 @@ struct TrajectoryRecord {
     /// always accompanies `verified: false` and says strictly more: not merely that
     /// the effect went unchecked, but that the input's ARRIVAL is unestablished.
     let deliveryConfirmed: Bool?
+    /// Present — and only ever `false` — when the action's post-action diff never
+    /// stopped changing within the settle budget. Such a record DOES carry its
+    /// `diff`; the field says that diff is the best reading available rather than a
+    /// finished one. Its absence is the ordinary case: the reading repeated across
+    /// two consecutive walks.
+    let settled: Bool?
     /// The run bundle's step ordinal for this record; present only when a run
     /// directory is active. It is what joins a record to its `steps/NNNN-…png`
     /// files, so the report never has to guess by position — which concurrent
@@ -176,6 +190,7 @@ struct TrajectoryRecord {
         screenshotPath: String?,
         verified: Bool? = nil,
         deliveryConfirmed: Bool? = nil,
+        settled: Bool? = nil,
         step: Int? = nil,
         evidence: RunEvidence? = nil
     ) {
@@ -193,6 +208,7 @@ struct TrajectoryRecord {
         self.screenshotPath = screenshotPath
         self.verified = verified
         self.deliveryConfirmed = deliveryConfirmed
+        self.settled = settled
         self.step = step
         self.evidence = evidence
     }
@@ -215,6 +231,7 @@ struct TrajectoryRecord {
         if let deliveryConfirmed {
             fields.append("\"deliveryConfirmed\":\(deliveryConfirmed ? "true" : "false")")
         }
+        if let settled { fields.append("\"settled\":\(settled ? "true" : "false")") }
         if let diff { fields.append("\"diff\":\(JSONText.string(diff))") }
         if let screenshotPath { fields.append("\"screenshotPath\":\(JSONText.string(screenshotPath))") }
         if let step { fields.append("\"step\":\(step)") }
@@ -277,6 +294,11 @@ public extension ActOutcome {
         switch self {
         case let .acted(output):
             return TrajectoryOutcomeInfo(ok: true, exit: 0, errorClass: nil, diff: output)
+        case let .actedUnsettled(output):
+            // The diff IS recorded — a provisional reading is still the only
+            // evidence there is — but `settled: false` says not to trust it as the
+            // action's finished effect.
+            return TrajectoryOutcomeInfo(ok: true, exit: 0, errorClass: nil, diff: output, settled: false)
         case .deliveredUnverified:
             // No `diff`: none was taken, and the stdout notice must never be
             // recorded as if it were one. `verified: false` carries the fact.
@@ -379,10 +401,15 @@ public extension ToolResult {
         var screenshotPath: String?
         var verified: Bool?
         var confirmed: Bool?
+        var stable: Bool?
         if ok {
             if kind == .action { diff = (unverified || unconfirmed) ? nil : text }
             if kind == .action, unverified || unconfirmed { verified = false }
             if kind == .action, unconfirmed { confirmed = false }
+            // An unsettled reading also comes from the result rather than the
+            // request, and — unlike the two above — keeps its `diff`: it is a real
+            // reading, just not a finished one.
+            if kind == .action, settled == false { stable = false }
             if kind == .screenshot { screenshotPath = TrajectoryRecord.screenshotPath(fromMessage: text) }
         }
         return TrajectoryOutcomeInfo(
@@ -392,7 +419,8 @@ public extension ToolResult {
             diff: diff,
             screenshotPath: screenshotPath,
             verified: verified,
-            deliveryConfirmed: confirmed
+            deliveryConfirmed: confirmed,
+            settled: stable
         )
     }
 }
