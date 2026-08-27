@@ -80,15 +80,40 @@ public enum WaitPipeline {
         let walkDeadline = min(BoundedWalk.defaultDeadline, max(timeout, 1.0))
         let probe = makeProbe(pid, walkDeadline)
         var lastSeen: [AXNode]?
+
+        // `.stable` is the one condition a single tree cannot decide, so it polls
+        // through a `QuiescenceTracker` fed the scoped digest of each walk. The
+        // tracker is a local `var` mutated by the (non-escaping) probe, so its
+        // counters survive the loop and feed the exit-4 diagnostic.
+        guard case let .stable(scope, window) = condition else {
+            let result = WaitPoll.poll(timeout: timeout, interval: interval, now: now, sleep: sleep) {
+                guard let nodes = probe() else { return false }
+                lastSeen = nodes
+                return WaitEvaluator.evaluate(condition, in: nodes)
+            }
+            if result.met { return .satisfied }
+            return .failed(
+                stderr: timeoutDiagnostic(condition: condition, timeout: timeout, lastSeen: lastSeen),
+                code: .waitTimeout
+            )
+        }
+
+        var tracker = QuiescenceTracker(window: window)
         let result = WaitPoll.poll(timeout: timeout, interval: interval, now: now, sleep: sleep) {
-            guard let nodes = probe() else { return false }
-            lastSeen = nodes
-            return WaitEvaluator.evaluate(condition, in: nodes)
+            let nodes = probe()
+            if let nodes { lastSeen = nodes }
+            // A failed/hung walk observed NOTHING, which is not evidence of a
+            // settled tree: nil restarts the quiet window (same as an absent scope).
+            let digest = nodes.flatMap { WaitDigest.digest(of: $0, scopedTo: scope) }
+            return tracker.observe(digest: digest, at: now())
         }
 
         if result.met { return .satisfied }
         return .failed(
-            stderr: timeoutDiagnostic(condition: condition, timeout: timeout, lastSeen: lastSeen),
+            stderr: quiescenceTimeoutDiagnostic(
+                condition: condition, timeout: timeout, scoped: scope != nil,
+                tracker: tracker, lastSeen: lastSeen
+            ),
             code: .waitTimeout
         )
     }
@@ -101,6 +126,37 @@ public enum WaitPipeline {
     static func timeoutDiagnostic(condition: WaitCondition, timeout: TimeInterval, lastSeen: [AXNode]?) -> String {
         "mtouch: wait timed out after \(formatDuration(timeout)) waiting for \(condition.description). "
             + "Last seen: \(lastSeenSummary(lastSeen))."
+    }
+
+    /// The exit-4 message for a quiescence wait. A bare "timed out" is useless
+    /// here, so it reports the two numbers that decide the retry:
+    ///   - how many CHANGES were observed, and
+    ///   - the LONGEST quiet stretch actually achieved (vs. the one required).
+    /// An agent can then tell "this UI is still streaming, give it more --timeout"
+    /// from "this UI never sits still, shorten --stable-for".
+    ///
+    /// The scope-never-matched case is called out separately: it is not a stability
+    /// failure at all but a criteria failure, and conflating the two would send an
+    /// agent tuning durations when it should be fixing its selector.
+    static func quiescenceTimeoutDiagnostic(
+        condition: WaitCondition,
+        timeout: TimeInterval,
+        scoped: Bool,
+        tracker: QuiescenceTracker,
+        lastSeen: [AXNode]?
+    ) -> String {
+        var message = "mtouch: wait timed out after \(formatDuration(timeout)) waiting for "
+            + "\(condition.description). "
+        if scoped, !tracker.everPresent {
+            message += "The criteria matched no element in any of \(tracker.observations) poll(s); "
+                + "an element that is not there has not settled. "
+        } else {
+            message += "Observed \(tracker.changes) change(s) over \(tracker.observations) poll(s); "
+                + "the longest quiet stretch was \(formatDuration(roundedToMilliseconds(tracker.longestQuiet))) "
+                + "of the \(formatDuration(tracker.window)) required. "
+                + "Retry with a longer --timeout, or a shorter --stable-for if this UI never fully settles. "
+        }
+        return message + "Last seen: \(lastSeenSummary(lastSeen))."
     }
 
     /// Compact description of the most recently walked tree: element count, the
@@ -124,6 +180,13 @@ public enum WaitPipeline {
             parts.append("window titles: " + titles.map { "\"\($0)\"" }.joined(separator: ", "))
         }
         return parts.joined(separator: "; ")
+    }
+
+    /// Snap a MEASURED duration to whole milliseconds so accumulated floating-point
+    /// error (`1.2000000000000002`) never reaches a diagnostic. Applied only to
+    /// measurements; configured durations are already exact as the user wrote them.
+    static func roundedToMilliseconds(_ seconds: TimeInterval) -> TimeInterval {
+        (seconds * 1000).rounded() / 1000
     }
 
     /// Render a duration back to its friendliest form for diagnostics: whole

@@ -120,7 +120,7 @@ public enum MCPToolCatalog {
         Spec(
             name: "wait",
             description: "Wait for a UI condition in an application. Provide exactly one of "
-                + "appears, disappears, text, or valueEquals.",
+                + "appears, disappears, text, valueEquals, or stable.",
             properties: [
                 Property(name: "app", type: "string",
                          description: "Bundle identifier of the target application."),
@@ -133,8 +133,17 @@ public enum MCPToolCatalog {
                          description: "Wait until this text becomes visible."),
                 Property(name: "valueEquals", type: "string",
                          description: "Wait until an element's value equals this string."),
+                Property(name: "stable", type: "boolean",
+                         description: "Wait until the watched tree STOPS CHANGING (quiescence). Use this after "
+                             + "text/appears when content streams in: text matches the first fragment, so "
+                             + "reading straight after it yields a half-written result. Any change restarts "
+                             + "the quiet window, and an 'of' criteria that matches nothing keeps waiting "
+                             + "rather than succeeding."),
                 Property(name: "of", type: "string",
-                         description: "Restrict valueEquals to elements matching this criteria."),
+                         description: "Restrict valueEquals or stable to elements matching this criteria."),
+                Property(name: "stableFor", type: "string",
+                         description: "How long stable requires the tree to stay unchanged (default 500ms). "
+                             + "May equal timeout but not exceed it."),
                 Property(name: "timeout", type: "string",
                          description: "Maximum time to wait, e.g. 5s or 500ms."),
                 Property(name: "interval", type: "string",
@@ -216,6 +225,20 @@ public enum MCPToolCatalog {
                 jsonProperty,
             ],
             required: ["action"]
+        ),
+        Spec(
+            name: "read",
+            description: "Print the full, untruncated text of a referenced element's subtree, in document "
+                + "order. Use it when the snapshot's node budget has dropped the text you need: snapshot "
+                + "renders one line per node and drops non-actionable nodes (long static text) first. "
+                + "Reading changes nothing — no activation, no input, and the session's references are "
+                + "left as they were.",
+            properties: [
+                Property(name: "ref", type: "string",
+                         description: "Element reference from a prior snapshot, e.g. e5."),
+                jsonProperty,
+            ],
+            required: ["ref"]
         ),
     ]
 

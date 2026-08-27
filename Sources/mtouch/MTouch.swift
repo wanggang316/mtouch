@@ -11,6 +11,7 @@ struct MTouch: ParsableCommand {
             App.self,
             Windows.self,
             Snapshot.self,
+            Read.self,
             Act.self,
             Wait.self,
             Clipboard.self,

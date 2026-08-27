@@ -97,6 +97,14 @@ public enum WaitCondition: Equatable, Sendable {
     /// Succeed once an element's value EQUALS the string (unicode-normalization
     /// insensitive). `of` restricts the search to elements matching a criteria.
     case valueEquals(String, of: WaitCriteria?)
+    /// Succeed once the watched subtree has STOPPED CHANGING: its digest has been
+    /// continuously unchanged for `window`. `of` scopes the digest to the elements
+    /// matching a criteria (nil ⇒ the whole tree).
+    ///
+    /// Unlike its siblings this is NOT decidable from a single tree — quiescence is
+    /// a property of a sequence of observations over time — so `WaitPipeline` routes
+    /// it through `QuiescenceTracker` instead of `WaitEvaluator`.
+    case stable(of: WaitCriteria?, window: TimeInterval)
 
     /// Human-readable phrasing for the timeout diagnostic.
     public var description: String {
@@ -112,6 +120,9 @@ public enum WaitCondition: Equatable, Sendable {
                 return "an element matching \(criteria.description) whose value equals \"\(string)\""
             }
             return "an element whose value equals \"\(string)\""
+        case let .stable(criteria, window):
+            let scope = criteria.map { "elements matching \($0.description)" } ?? "the accessibility tree"
+            return "\(scope) to stop changing for \(WaitPipeline.formatDuration(window))"
         }
     }
 }
@@ -120,7 +131,22 @@ public enum WaitCondition: Equatable, Sendable {
 /// NO AX/TCC access, so every condition is unit-testable with literal `AXNode`
 /// fixtures.
 public enum WaitEvaluator {
+    /// Whether `condition` can be decided from ONE walked tree. Every condition can
+    /// except `.stable`, whose subject is the sequence of trees over time; the
+    /// pipeline routes that one to `QuiescenceTracker` instead. Exposed so the
+    /// routing decision is a named, testable rule rather than a `switch` buried in
+    /// the pipeline.
+    public static func isStateless(_ condition: WaitCondition) -> Bool {
+        if case .stable = condition { return false }
+        return true
+    }
+
     /// Whether `condition` holds over the given root nodes (windows + menu bar).
+    ///
+    /// `.stable` always answers FALSE here: a single tree is never evidence that a
+    /// UI has stopped changing. The pipeline never asks (see `isStateless`), and
+    /// "not met" is the safe answer for any caller that does — it keeps waiting
+    /// rather than declaring an unobserved sequence settled.
     public static func evaluate(_ condition: WaitCondition, in roots: [AXNode]) -> Bool {
         let all = roots.flatMap(\.flattened)
         switch condition {
@@ -137,6 +163,8 @@ public enum WaitEvaluator {
                 guard let value = node.value else { return false }
                 return normalized(value) == target
             }
+        case .stable:
+            return false
         }
     }
 

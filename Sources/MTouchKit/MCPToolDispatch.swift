@@ -210,6 +210,7 @@ public enum MCPToolDispatch {
         case "doctor": return doctor(arguments, permissions: permissions)
         case "app": return app(arguments, permissions: permissions)
         case "clipboard": return clipboard(arguments)
+        case "read": return read(arguments, environment: environment, permissions: permissions)
         default:
             // Unknown tool name is a DOMAIN failure (isError), not a JSON-RPC
             // method-not-found — the method (tools/call) exists; the argument
@@ -383,16 +384,28 @@ public enum MCPToolDispatch {
         let text = args.string("text")
         let valueEquals = args.string("valueEquals")
         let of = args.string("of")
+        let stable = args.bool("stable") ?? false
+
+        // The timeout is parsed BEFORE the grammar check because the grammar needs
+        // it: a `stableFor` longer than the budget is a usage error.
+        guard let timeoutRaw = args.string("timeout"), let timeout = WaitDuration(parsing: timeoutRaw) else {
+            return invalidArgs("wait requires a valid 'timeout' (e.g. 5s, 500ms, or a bare number of seconds).")
+        }
+        var stableFor: WaitDuration?
+        if let raw = args.string("stableFor") {
+            guard let parsed = WaitDuration(parsing: raw) else {
+                return invalidArgs("'stableFor' must be a valid duration (e.g. 500ms).")
+            }
+            stableFor = parsed
+        }
 
         if let message = WaitGrammar.selectionError(
-            appears: appears, disappears: disappears, text: text, valueEquals: valueEquals, of: of
+            appears: appears, disappears: disappears, text: text, valueEquals: valueEquals, of: of,
+            stable: stable, stableFor: stableFor?.seconds, timeout: timeout.seconds
         ) {
             return invalidArgs(message)
         }
 
-        guard let timeoutRaw = args.string("timeout"), let timeout = WaitDuration(parsing: timeoutRaw) else {
-            return invalidArgs("wait requires a valid 'timeout' (e.g. 5s, 500ms, or a bare number of seconds).")
-        }
         let interval: WaitDuration
         if let intervalRaw = args.string("interval") {
             guard let parsed = WaitDuration(parsing: intervalRaw) else {
@@ -404,7 +417,8 @@ public enum MCPToolDispatch {
         }
 
         let condition = WaitGrammar.makeCondition(
-            appears: appears, disappears: disappears, text: text, valueEquals: valueEquals, of: of
+            appears: appears, disappears: disappears, text: text, valueEquals: valueEquals, of: of,
+            stable: stable, stableFor: stableFor?.seconds
         )
         let outcome = WaitPipeline.run(
             bundleId: app, condition: condition,
@@ -418,6 +432,23 @@ public enum MCPToolDispatch {
             return .text("condition met: \(condition.description)")
         case let .failed(stderr, _):
             return .text(stderr, isError: true)
+        }
+    }
+
+    // MARK: - read
+
+    private static func read(
+        _ args: ToolArguments, environment: [String: String], permissions: PermissionProvider
+    ) -> ToolResult {
+        guard let ref = args.string("ref"), !ref.isEmpty else {
+            return invalidArgs("read requires a 'ref' argument (an element reference from a prior snapshot).")
+        }
+        switch ReadPipeline.run(
+            ref: ref, json: args.bool("json") ?? false,
+            environment: environment, permissions: permissions
+        ) {
+        case let .read(output): return .text(output)
+        case let .failed(stderr, _): return .text(stderr, isError: true)
         }
     }
 

@@ -239,6 +239,20 @@ public extension ClipboardOutcome {
     }
 }
 
+public extension ReadOutcome {
+    /// `read` is a READ record: the element's text is never carried into the
+    /// trajectory (only `.action` records carry a payload), so a long answer — or a
+    /// masked secure value — is not duplicated into the log.
+    var trajectoryInfo: TrajectoryOutcomeInfo {
+        switch self {
+        case .read:
+            return TrajectoryOutcomeInfo(ok: true, exit: 0, errorClass: nil)
+        case let .failed(_, code):
+            return TrajectoryOutcomeInfo(ok: false, exit: code.rawValue, errorClass: code.trajectoryErrorClass)
+        }
+    }
+}
+
 public extension WaitOutcome {
     var trajectoryInfo: TrajectoryOutcomeInfo {
         switch self {

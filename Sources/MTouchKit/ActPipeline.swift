@@ -56,6 +56,31 @@ public enum ActPipeline {
                 code: .usageError
             ))
         }
+        return resolveRefTarget(
+            ref: ref, environment: environment, permissions: permissions, loadSession: loadSession
+        )
+    }
+
+    /// The verb-INDEPENDENT half of `resolveTarget`: token shape (usage 64) →
+    /// permission (2) → session/ref resolution (3), in that pinned order.
+    ///
+    /// Internal so a read-only ref command composes the SAME resolution — and
+    /// therefore the same exit codes and byte-identical diagnostics — instead of
+    /// restating them. `resolveTarget` layers the act-only `set-value` payload rule
+    /// on top; the token check is repeated here so this entry point is total on its
+    /// own (it is idempotent, so the ordering is unchanged either way).
+    static func resolveRefTarget(
+        ref: String,
+        environment: [String: String],
+        permissions: PermissionProvider,
+        loadSession: (String) -> Session?
+    ) -> Target {
+        // 1. Usage (exit 64): a non-token argument is a malformed reference, not a
+        //    missing element — decided from the argument alone, so it outranks the
+        //    permission/session gates.
+        guard Session.isRefToken(ref) else {
+            return .terminal(.failed(stderr: unknownRefDiagnostic(ref), code: .usageError))
+        }
 
         // 2. Permission (exit 2): fail fast with the doctor-pointing diagnostic.
         guard permissions.accessibilityGranted else {

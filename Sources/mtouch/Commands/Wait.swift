@@ -16,8 +16,20 @@ struct Wait: ParsableCommand {
         AXButton, window → AXWindow, menu → AXMenu); a raw AX role is also accepted. \
         A role that matches nothing simply times out (exit 4).
 
+        --stable waits for QUIESCENCE: the watched tree must stop changing, not \
+        merely start containing something. Scope it with --of; without --of the \
+        whole tree must settle. Use it after a --text or --appears wait when the \
+        content streams in — --text matches the FIRST fragment, so reading straight \
+        after it yields a half-written result. Any change restarts the quiet window; \
+        --of matching nothing is not success (an absent element has not settled), so \
+        it keeps waiting until the element appears AND settles. On timeout the \
+        diagnostic reports how many changes were seen and the longest quiet stretch \
+        achieved, so a retry can be an informed one.
+
         DURATIONS accept '5s', '500ms', or a bare number of seconds ('5'). The \
-        default interval is 100ms.
+        default interval is 100ms and the default --stable-for is 500ms. \
+        --stable-for may equal --timeout (meaning "never changed at all"), but not \
+        exceed it (exit 64).
 
         Exit codes: 0 condition met; 4 timed out; 2 Accessibility not granted; \
         1 the application is not running; 64 a malformed invocation.
@@ -42,8 +54,19 @@ struct Wait: ParsableCommand {
     @Option(help: ArgumentHelp("Wait until an element's value equals the given string.", valueName: "s"))
     var valueEquals: String?
 
-    @Option(help: ArgumentHelp("Restrict --value-equals to elements matching this criteria.", valueName: "criteria"))
+    @Flag(help: "Wait until the watched tree stops changing (quiescence). Scope it with --of.")
+    var stable = false
+
+    @Option(help: ArgumentHelp(
+        "Scope for --value-equals and --stable: only elements matching this criteria.",
+        valueName: "criteria"
+    ))
     var of: String?
+
+    @Option(help: ArgumentHelp(
+        "How long --stable requires the tree to stay unchanged (default 500ms).", valueName: "duration"
+    ))
+    var stableFor: WaitDuration?
 
     @Option(help: ArgumentHelp("Maximum time to wait (e.g. 5s, 500ms).", valueName: "duration"))
     var timeout: WaitDuration
@@ -56,7 +79,8 @@ struct Wait: ParsableCommand {
 
     mutating func validate() throws {
         if let message = WaitGrammar.selectionError(
-            appears: appears, disappears: disappears, text: text, valueEquals: valueEquals, of: of
+            appears: appears, disappears: disappears, text: text, valueEquals: valueEquals, of: of,
+            stable: stable, stableFor: stableFor?.seconds, timeout: timeout.seconds
         ) {
             throw ValidationError(message)
         }
@@ -64,7 +88,8 @@ struct Wait: ParsableCommand {
 
     mutating func run() throws {
         let condition = WaitGrammar.makeCondition(
-            appears: appears, disappears: disappears, text: text, valueEquals: valueEquals, of: of
+            appears: appears, disappears: disappears, text: text, valueEquals: valueEquals, of: of,
+            stable: stable, stableFor: stableFor?.seconds
         )
 
         let outcome = try recorded(
@@ -76,7 +101,9 @@ struct Wait: ParsableCommand {
                 "disappears": disappears.map(TrajectoryArgs.Value.string),
                 "text": text.map(TrajectoryArgs.Value.string),
                 "valueEquals": valueEquals.map(TrajectoryArgs.Value.string),
+                "stable": stable ? .bool(true) : nil,
                 "of": of.map(TrajectoryArgs.Value.string),
+                "stableFor": stableFor.map { .double($0.seconds) },
                 "timeout": .double(timeout.seconds),
                 "interval": interval.map { .double($0.seconds) },
             ]),

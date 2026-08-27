@@ -33,7 +33,7 @@ private func call(_ tool: String, _ args: [String: ToolArgumentValue],
 /// The advertised tool set, in catalog order. New tools are APPENDED so an
 /// existing client's view of the earlier ones never shifts.
 private let advertisedTools = [
-    "snapshot", "act", "wait", "screenshot", "apps", "windows", "doctor", "app", "clipboard",
+    "snapshot", "act", "wait", "screenshot", "apps", "windows", "doctor", "app", "clipboard", "read",
 ]
 
 @Suite struct MCPToolCatalogTests {
@@ -63,6 +63,7 @@ private let advertisedTools = [
         #expect(spec("doctor").required.isEmpty)
         #expect(spec("app").required == ["action", "app"])
         #expect(spec("clipboard").required == ["action"])
+        #expect(spec("read").required == ["ref"])
     }
 
     /// The action-shaped tools constrain their verb to an enum, so a client cannot
@@ -96,10 +97,29 @@ private let advertisedTools = [
         #expect(MCPToolCatalog.tools.count == advertisedTools.count)
         #expect(Set(MCPToolCatalog.toolNames) == Set(advertisedTools))
         // Tools with no app argument gain nothing.
-        for name in ["screenshot", "apps", "doctor", "clipboard"] {
+        for name in ["screenshot", "apps", "doctor", "clipboard", "read"] {
             let spec = MCPToolCatalog.tools.first { $0.name == name }
             #expect(spec?.properties.contains { $0.name == "pid" } == false)
         }
+    }
+
+    /// `--stable` reaches the MCP surface with the same vocabulary as the CLI, so
+    /// an agent does not have to re-learn the grammar when it switches surfaces.
+    @Test func waitAdvertisesTheQuiescenceArguments() throws {
+        let spec = try #require(MCPToolCatalog.tools.first { $0.name == "wait" })
+        let stable = try #require(spec.properties.first { $0.name == "stable" })
+        #expect(stable.type == "boolean")
+        let stableFor = try #require(spec.properties.first { $0.name == "stableFor" })
+        #expect(stableFor.type == "string")
+        // Optional: the tool's required set is unchanged.
+        #expect(spec.required == ["app", "timeout"])
+    }
+
+    @Test func readAdvertisesARefAndAJSONFlagOnly() throws {
+        let spec = try #require(MCPToolCatalog.tools.first { $0.name == "read" })
+        #expect(spec.properties.map(\.name) == ["ref", "json"])
+        let ref = try #require(spec.properties.first { $0.name == "ref" })
+        #expect(ref.type == "string")
     }
 
     @Test func actVerbEnumCoversTheGrammar() {
@@ -418,6 +438,105 @@ private let advertisedTools = [
         #expect(result.isError)
         #expect(text(result)?.contains("requires a 'text'") == true)
     }
+
+    // MARK: wait --stable
+
+    @Test func waitStableIsAcceptedAsACondition() {
+        // It reaches the permission gate, so the grammar accepted it as the single
+        // condition rather than rejecting it as "no condition".
+        let result = call("wait", ["app": .string("com.apple.TextEdit"),
+                                   "stable": .bool(true), "timeout": .string("1s")],
+                          permissions: ungranted)
+        #expect(result.isError)
+        #expect(text(result) == PermissionError(permission: .accessibility).diagnostic)
+    }
+
+    @Test func waitStableWithAnotherConditionIsInvalidArgs() {
+        let result = call("wait", ["app": .string("com.apple.TextEdit"), "timeout": .string("1s"),
+                                   "stable": .bool(true), "text": .string("hi")])
+        #expect(result.isError)
+        #expect(text(result)?.contains("only one condition") == true)
+    }
+
+    @Test func waitStableForLongerThanTimeoutIsInvalidArgs() {
+        let result = call("wait", ["app": .string("com.apple.TextEdit"), "timeout": .string("1s"),
+                                   "stable": .bool(true), "stableFor": .string("5s")])
+        #expect(result.isError)
+        #expect(text(result)?.contains("--stable-for") == true)
+    }
+
+    @Test func waitStableForWithoutStableIsInvalidArgs() {
+        let result = call("wait", ["app": .string("com.apple.TextEdit"), "timeout": .string("5s"),
+                                   "text": .string("hi"), "stableFor": .string("1s")])
+        #expect(result.isError)
+        #expect(text(result)?.contains("--stable-for is only valid") == true)
+    }
+
+    @Test func waitStableForMustBeAValidDuration() {
+        let result = call("wait", ["app": .string("com.apple.TextEdit"), "timeout": .string("5s"),
+                                   "stable": .bool(true), "stableFor": .string("soon")])
+        #expect(result.isError)
+        #expect(text(result)?.contains("stableFor") == true)
+    }
+
+    // MARK: read
+
+    @Test func readMissingRefIsInvalidArgs() {
+        let result = call("read", [:])
+        #expect(result.isError)
+        #expect(text(result)?.contains("requires a 'ref'") == true)
+    }
+
+    @Test func readUnknownTokenCarriesTheCLIDiagnosticVerbatim() {
+        let result = call("read", ["ref": .string("banana")], permissions: axOnly)
+        #expect(result.isError)
+        #expect(text(result) == ActPipeline.unknownRefDiagnostic("banana"))
+    }
+
+    @Test func readUngrantedNamesAccessibility() {
+        let result = call("read", ["ref": .string("e1")], permissions: ungranted)
+        #expect(result.isError)
+        #expect(text(result) == PermissionError(permission: .accessibility).diagnostic)
+    }
+
+    @Test func readNoSessionCarriesTheCLIDiagnosticVerbatim() {
+        let result = call("read", ["ref": .string("e1")], permissions: axOnly,
+                          environment: [MTouchEnvironment.sessionKey: "/nonexistent/mtouch-mcp/none.json"])
+        #expect(result.isError)
+        #expect(text(result) == ActPipeline.noSessionDiagnostic("e1"))
+    }
+}
+
+// MARK: - read payload parity (MCP vs CLI pipeline)
+
+@Suite struct MCPReadParityTests {
+    /// The MCP tool must return the pipeline's payload byte for byte — the whole
+    /// point of the surface being a thin mirror. Driven through a REAL session file
+    /// (so the ref resolves) whose recorded process cannot exist, which lands both
+    /// surfaces on the same exit-1 diagnostic without any AX access.
+    @Test func mcpAndTheCLIPipelineProduceTheIdenticalPayload() throws {
+        let dir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("mtouch-mcp-read-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: dir) }
+
+        let path = dir.appendingPathComponent("session.json").path
+        let tree = [AXNode(role: "AXWindow", title: "W", children: [
+            AXNode(role: "AXButton", title: "Save", actionable: true),
+        ])]
+        try SessionStore.save(Snapshot(roots: tree), app: "com.example.NotReal", pid: 4242, to: path)
+        let environment = [MTouchEnvironment.sessionKey: path]
+
+        let pipeline = ReadPipeline.run(
+            ref: "e1", json: false, environment: environment, permissions: axOnly
+        )
+        guard case let .failed(stderr, _) = pipeline else {
+            Issue.record("expected the recorded process to be gone"); return
+        }
+        let result = call("read", ["ref": .string("e1")], permissions: axOnly, environment: environment)
+        #expect(result.isError)
+        #expect(text(result) == stderr)
+    }
 }
 
 // MARK: - Trajectory classification of the new tools
@@ -440,7 +559,7 @@ private let advertisedTools = [
     }
 
     @Test func theArgumentAwareClassifierAgreesWithTheNameOnlyOneElsewhere() {
-        for tool in ["snapshot", "act", "screenshot", "wait", "apps", "windows", "doctor", "app"] {
+        for tool in ["snapshot", "act", "screenshot", "wait", "apps", "windows", "doctor", "app", "read"] {
             #expect(MCPToolDispatch.trajectoryKind(forTool: tool, arguments: ToolArguments())
                 == MCPToolDispatch.trajectoryKind(forTool: tool), "\(tool) must classify identically")
         }
