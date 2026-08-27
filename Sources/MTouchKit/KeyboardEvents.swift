@@ -9,17 +9,37 @@ enum KeyboardEvents {
     /// text by codepoint instead of keymap lookup, so CJK and emoji type
     /// correctly, and newline/tab flow through as the literal `\n` / `\t`
     /// characters rather than being interpreted as key names.
-    static func typing(_ text: String, source: CGEventSource?) -> [CGEvent] {
+    ///
+    /// When `layout` can reach the grapheme in one stroke, the pair *also*
+    /// carries that real virtual key code and its modifier flags. Clients that
+    /// rebuild the character from the key code rather than reading the unicode
+    /// payload — the out-of-process open/save panel service among them — ignore
+    /// payload-only events, and a key code is the only thing they will accept.
+    /// The payload stays on the event either way, so nothing that already read
+    /// it changes behaviour, and anything off the layout keeps the `virtualKey:
+    /// 0` fallback unchanged.
+    static func typing(
+        _ text: String,
+        source: CGEventSource?,
+        layout: KeyboardLayout = .current
+    ) -> [CGEvent] {
         var events: [CGEvent] = []
         for character in text {
             let utf16 = Array(String(character).utf16)
-            if let down = CGEvent(keyboardEventSource: source, virtualKey: 0, keyDown: true) {
-                setUnicodeString(utf16, on: down)
-                events.append(down)
-            }
-            if let up = CGEvent(keyboardEventSource: source, virtualKey: 0, keyDown: false) {
-                setUnicodeString(utf16, on: up)
-                events.append(up)
+            let keystroke = layout.keystroke(for: character)
+            let keyCode = keystroke?.keyCode ?? 0
+            for keyDown in [true, false] {
+                guard let event = CGEvent(keyboardEventSource: source, virtualKey: keyCode, keyDown: keyDown) else {
+                    continue
+                }
+                // Only the key code path sets flags, and it always sets them:
+                // an inherited modifier held elsewhere would otherwise turn a
+                // typed character into a shortcut.
+                if let keystroke {
+                    event.flags = keystroke.flags
+                }
+                setUnicodeString(utf16, on: event)
+                events.append(event)
             }
         }
         return events
