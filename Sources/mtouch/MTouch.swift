@@ -8,14 +8,16 @@ struct MTouch: ParsableCommand {
         subcommands: [
             Doctor.self,
             Apps.self,
+            App.self,
             Windows.self,
             Snapshot.self,
             Act.self,
             Wait.self,
+            Clipboard.self,
             Screenshot.self,
             MCP.self,
             // DEV-ONLY, hidden from --help (shouldDisplay: false). Not one of the
-            // eight public subcommands; exercises AXTreeWalker against a live app.
+            // public subcommands; exercises AXTreeWalker against a live app.
             WalkSmoke.self,
         ]
     )

@@ -4,8 +4,9 @@ import Foundation
 /// The class decides which digest fields a record carries (see `TrajectoryRecord`):
 ///
 ///   - `.snapshot` — carries the tree `digest` (no pre/post pair).
-///   - `.action`   — a MUTATING `act …` verb; carries `preDigest`/`postDigest`
-///     (the `Session.digest` before/after) plus the emitted `diff`.
+///   - `.action`   — a MUTATING command (any `act …` verb, and the `app` /
+///     `clipboard` write verbs); carries `preDigest`/`postDigest` (the
+///     `Session.digest` before/after) plus the emitted `diff` when it has one.
 ///   - `.read`     — a read-only command (`apps`/`windows`/`doctor`/`wait`); no
 ///     digests (the documented absent form).
 ///   - `.screenshot` — references the written PNG path, NEVER image bytes.
@@ -210,6 +211,28 @@ public extension ScreenshotOutcome {
         switch self {
         case let .written(path, _):
             return TrajectoryOutcomeInfo(ok: true, exit: 0, errorClass: nil, screenshotPath: path)
+        case let .failed(_, code):
+            return TrajectoryOutcomeInfo(ok: false, exit: code.rawValue, errorClass: code.trajectoryErrorClass)
+        }
+    }
+}
+
+public extension AppOutcome {
+    var trajectoryInfo: TrajectoryOutcomeInfo {
+        switch self {
+        case .reported:
+            return TrajectoryOutcomeInfo(ok: true, exit: 0, errorClass: nil)
+        case let .failed(_, code):
+            return TrajectoryOutcomeInfo(ok: false, exit: code.rawValue, errorClass: code.trajectoryErrorClass)
+        }
+    }
+}
+
+public extension ClipboardOutcome {
+    var trajectoryInfo: TrajectoryOutcomeInfo {
+        switch self {
+        case .rendered:
+            return TrajectoryOutcomeInfo(ok: true, exit: 0, errorClass: nil)
         case let .failed(_, code):
             return TrajectoryOutcomeInfo(ok: false, exit: code.rawValue, errorClass: code.trajectoryErrorClass)
         }

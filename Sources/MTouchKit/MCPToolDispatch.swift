@@ -122,7 +122,7 @@ public enum MCPToolDispatch {
         environment: [String: String],
         permissions: PermissionProvider = LivePermissionProvider()
     ) -> ToolResult {
-        let kind = trajectoryKind(forTool: tool)
+        let kind = trajectoryKind(forTool: tool, arguments: arguments)
         do {
             return try TrajectoryRecorder.record(
                 command: tool,
@@ -141,16 +141,26 @@ public enum MCPToolDispatch {
         }
     }
 
-    /// The record class for a tool: act mutates, snapshot fingerprints a tree,
-    /// screenshot writes a file, everything else (wait/apps/windows/doctor and any
-    /// unknown tool) is a read.
+    /// The record class for a tool: act and app mutate, snapshot fingerprints a
+    /// tree, screenshot writes a file, everything else (wait/apps/windows/doctor and
+    /// any unknown tool) is a read.
     static func trajectoryKind(forTool tool: String) -> TrajectoryKind {
         switch tool {
-        case "act": return .action
+        case "act", "app": return .action
         case "snapshot": return .snapshot
         case "screenshot": return .screenshot
         default: return .read
         }
+    }
+
+    /// The record class refined by the tool's ARGUMENTS, for the one tool whose
+    /// class depends on them: `clipboard` reads with `get` and mutates with
+    /// `set`/`clear`. Keeps each MCP record in the same class as the CLI command it
+    /// mirrors (`clipboard get` is a read on both surfaces), which is the parity the
+    /// record model promises.
+    static func trajectoryKind(forTool tool: String, arguments: ToolArguments) -> TrajectoryKind {
+        guard tool == "clipboard" else { return trajectoryKind(forTool: tool) }
+        return arguments.string("action") == "get" ? .read : .action
     }
 
     /// Serialize the tool's arguments into recorder args, preserving each value's
@@ -198,6 +208,8 @@ public enum MCPToolDispatch {
         case "apps": return apps(arguments)
         case "windows": return windows(arguments, permissions: permissions)
         case "doctor": return doctor(arguments, permissions: permissions)
+        case "app": return app(arguments, permissions: permissions)
+        case "clipboard": return clipboard(arguments)
         default:
             // Unknown tool name is a DOMAIN failure (isError), not a JSON-RPC
             // method-not-found — the method (tools/call) exists; the argument
@@ -301,6 +313,25 @@ public enum MCPToolDispatch {
             }
             return fromAct(ActPipeline.runKeyboard(
                 action: .type(text), appOverride: app, json: json,
+                environment: environment, permissions: permissions, resolvePID: resolvePID
+            ))
+
+        case "menu":
+            guard let raw = args.string("path"), !raw.isEmpty else {
+                return invalidArgs("act menu requires a 'path' argument, e.g. 'File>Save'.")
+            }
+            let menuPath: MenuPath
+            do {
+                menuPath = try MenuPath(parsing: raw)
+            } catch let error as MenuPathError {
+                // A malformed path is a domain (invalid-argument) failure, reusing the
+                // CLI's exact diagnostic.
+                return .text(error.message, isError: true)
+            } catch {
+                return .text("mtouch: invalid menu path '\(raw)'.", isError: true)
+            }
+            return fromAct(ActPipeline.runMenu(
+                path: menuPath, appOverride: app, json: json,
                 environment: environment, permissions: permissions, resolvePID: resolvePID
             ))
 
@@ -453,6 +484,100 @@ public enum MCPToolDispatch {
             return .text(report.jsonString())
         }
         return .text(report.textLines().joined(separator: "\n"))
+    }
+
+    // MARK: - app
+
+    private static func app(_ args: ToolArguments, permissions: PermissionProvider) -> ToolResult {
+        guard let action = args.string("action") else {
+            return invalidArgs("app requires an 'action' argument. Valid actions: launch, activate, quit.")
+        }
+        guard let bundleId = args.string("app"), !bundleId.isEmpty else {
+            return invalidArgs("app requires an 'app' argument (a bundle identifier).")
+        }
+        let json = args.bool("json") ?? false
+
+        switch action {
+        case "launch":
+            // A pid cannot select an instance that does not exist yet, so it is
+            // refused rather than silently ignored (the CLI has no --pid here).
+            if args.isPresent("pid") {
+                return invalidArgs("'pid' does not apply to app launch; drop it, or use action 'activate'.")
+            }
+            var waitReady: TimeInterval?
+            if let raw = args.string("waitReady") {
+                guard let parsed = WaitDuration(parsing: raw) else {
+                    return invalidArgs("'waitReady' must be a valid duration (e.g. 15s).")
+                }
+                waitReady = parsed.seconds
+            }
+            return fromApp(AppLifecycle.launch(
+                bundleId: bundleId, waitReady: waitReady, json: json, permissions: permissions
+            ))
+
+        case "activate":
+            guard let resolvePID = resolvePIDSeam(args) else { return invalidPID() }
+            return fromApp(AppLifecycle.activate(
+                bundleId: bundleId, json: json, permissions: permissions, resolvePID: resolvePID
+            ))
+
+        case "quit":
+            guard let resolvePID = resolvePIDSeam(args) else { return invalidPID() }
+            var timeout = AppLifecycle.quitBudget
+            if let raw = args.string("timeout") {
+                guard let parsed = WaitDuration(parsing: raw) else {
+                    return invalidArgs("'timeout' must be a valid duration (e.g. 10s).")
+                }
+                timeout = parsed.seconds
+            }
+            return fromApp(AppLifecycle.quit(
+                bundleId: bundleId, force: args.bool("force") ?? false, timeout: timeout,
+                json: json, resolvePID: resolvePID
+            ))
+
+        default:
+            return invalidArgs("app: unknown action '\(action)'. Valid actions: launch, activate, quit.")
+        }
+    }
+
+    private static func fromApp(_ outcome: AppOutcome) -> ToolResult {
+        switch outcome {
+        case let .reported(output): return .text(output)
+        case let .failed(stderr, _): return .text(stderr, isError: true)
+        }
+    }
+
+    // MARK: - clipboard
+
+    private static func clipboard(_ args: ToolArguments) -> ToolResult {
+        guard let action = args.string("action") else {
+            return invalidArgs("clipboard requires an 'action' argument. Valid actions: get, set, clear.")
+        }
+        let json = args.bool("json") ?? false
+
+        switch action {
+        case "get":
+            return fromClipboard(ClipboardPipeline.get(json: json))
+        case "set":
+            guard let text = args.string("text") else {
+                return invalidArgs("clipboard set requires a 'text' argument.")
+            }
+            return fromClipboard(ClipboardPipeline.set(text: text, json: json))
+        case "clear":
+            return fromClipboard(ClipboardPipeline.clear(json: json))
+        default:
+            return invalidArgs("clipboard: unknown action '\(action)'. Valid actions: get, set, clear.")
+        }
+    }
+
+    /// A silent CLI success (`.rendered(nil)`) has no exit code to speak for it over
+    /// MCP, so it becomes an explicit confirmation rather than an empty payload a
+    /// client would have to interpret.
+    private static func fromClipboard(_ outcome: ClipboardOutcome) -> ToolResult {
+        switch outcome {
+        case let .rendered(output): return .text(output ?? "ok")
+        case let .failed(stderr, _): return .text(stderr, isError: true)
+        }
     }
 
     // MARK: - Helpers

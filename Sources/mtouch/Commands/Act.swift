@@ -10,6 +10,7 @@ struct Act: ParsableCommand {
             Press.self,
             Focus.self,
             ShowMenu.self,
+            Menu.self,
             SetValue.self,
             Click.self,
             RightClick.self,
@@ -125,6 +126,106 @@ extension Act {
         @OptionGroup var arguments: RefActionArguments
 
         mutating func run() throws { try runRefVerb(.setValue, arguments) }
+    }
+}
+
+// MARK: - Menu-path verb
+
+/// Executes `act menu` through `ActPipeline.runMenu` and maps its outcome to
+/// stdout/stderr + exit code, mirroring the other verb runners.
+func runMenuVerb(_ path: MenuPath, appOverride: String?, pidOverride: pid_t?, json: Bool) throws {
+    let environment = ProcessInfo.processInfo.environment
+    let outcome = try recorded(
+        command: "act",
+        args: TrajectoryArgs.build([
+            "verb": .string("menu"),
+            "path": .string(path.rendered),
+            "json": json ? .bool(true) : nil,
+            "app": appOverride.map(TrajectoryArgs.Value.string),
+            "pid": pidOverride.map { .int(Int($0)) },
+        ]),
+        kind: .action,
+        describe: { (outcome: ActOutcome) in outcome.trajectoryInfo }
+    ) {
+        ActPipeline.runMenu(
+            path: path,
+            appOverride: appOverride,
+            json: json,
+            environment: environment,
+            resolvePID: AppTarget.resolver(pid: pidOverride)
+        )
+    }
+    switch outcome {
+    case let .acted(output):
+        print(output)
+    case let .failed(stderr, code):
+        FileHandle.standardError.write(Data((stderr + "\n").utf8))
+        throw ExitCode(code.rawValue)
+    }
+}
+
+extension Act {
+    struct Menu: ParsableCommand {
+        static let configuration = CommandConfiguration(
+            commandName: "menu",
+            abstract: "Invoke a menu-bar command by its title path.",
+            discussion: """
+            Walks the application's menu bar by title — 'File>Save' opens File, then \
+            invokes Save — pressing each level over the accessibility API and \
+            returning the resulting diff like every other act verb.
+
+            This is the reliable way to command an application whose content area is \
+            not exposed over the accessibility API: its menu bar almost always is, and \
+            each step is a verifiable press rather than a blind keyboard shortcut that \
+            depends on winning the frontmost race.
+
+            Titles are user-visible and may be localized ('文件>存储'). Each segment is \
+            matched exactly first, then case-insensitively; a segment that matches \
+            nothing exits 1 and LISTS the titles that were available at that level. A \
+            disabled item, and two same-titled items, are also refused rather than \
+            guessed. A failed path never leaves a menu open.
+
+            Use the repeatable --item form for a title that itself contains '>'.
+            """
+        )
+
+        @Argument(help: ArgumentHelp("Menu title path, '>'-separated, e.g. 'File>Save'.", valueName: "path"))
+        var path: String?
+
+        @Option(help: ArgumentHelp(
+            "One exact menu title; repeat once per level. Use instead of <path> when a title contains '>'.",
+            valueName: "title"
+        ))
+        var item: [String] = []
+
+        @Flag(help: "Emit the resulting diff as machine-readable JSON.")
+        var json = false
+
+        @OptionGroup var appOptions: OptionalAppOptions
+
+        mutating func validate() throws {
+            if path == nil, item.isEmpty {
+                throw ValidationError("Provide a menu path such as 'File>Save', or one --item per menu level.")
+            }
+            if path != nil, !item.isEmpty {
+                throw ValidationError("Pass either <path> or --item, not both.")
+            }
+        }
+
+        mutating func run() throws {
+            // Parse the path FIRST: a malformed path is a usage error (exit 64) that
+            // must precede any permission/AX work (pinned 64 -> 2 -> 3 -> 1).
+            let menuPath: MenuPath
+            do {
+                menuPath = path == nil ? try MenuPath(segments: item) : try MenuPath(parsing: path!)
+            } catch let error as MenuPathError {
+                FileHandle.standardError.write(Data((error.message + "\n").utf8))
+                throw ExitCode(error.exitCode.rawValue)
+            }
+            try runMenuVerb(
+                menuPath, appOverride: appOptions.app, pidOverride: appOptions.pid, json: json
+            )
+        }
     }
 }
 

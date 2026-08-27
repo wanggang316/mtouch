@@ -8,7 +8,11 @@ import Foundation
 /// activation could leak input into the invoking terminal (VAL-ACT-019). Shared
 /// by the keyboard AND coordinate delivery seams so both fight frontmost
 /// contention identically rather than forking the logic.
-enum FrontmostActivation {
+///
+/// Public because it is also the DEFAULT activation seam of the menu-path verb,
+/// which must name it in a default argument: only the frontmost application's
+/// menu bar is actually drawn, so a menu walk activates first.
+public enum FrontmostActivation {
     /// Bring `pid` frontmost, then settle. Two mechanisms are asserted together
     /// because either alone is unreliable when the CALLER'S app is itself
     /// frontmost (the common case — an agent invokes mtouch from its terminal):
@@ -23,7 +27,7 @@ enum FrontmostActivation {
     /// an aggressively-foreground caller re-assert itself in the gap before the
     /// first event is posted; a bare sleep gives the activation time to land at the
     /// window server without opening that re-grab window.
-    static func bringToFront(pid: pid_t, settle: TimeInterval = 0.2) {
+    public static func bringToFront(pid: pid_t, settle: TimeInterval = 0.2) {
         let appElement = AXUIElementCreateApplication(pid)
         let running = NSRunningApplication(processIdentifier: pid)
         AXUIElementSetAttributeValue(appElement, kAXFrontmostAttribute as CFString, kCFBooleanTrue)

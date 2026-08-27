@@ -210,6 +210,24 @@ public enum ActPipeline {
         )
     }
 
+    /// Resolve the app a menu-path verb targets: the explicit `--app`, else the
+    /// current session's app. Same resolution as the keyboard/coordinate verbs (so
+    /// the pinned precedence is identical); only the exit-3 no-target message
+    /// differs ("no app whose menus to drive").
+    static func resolveMenuTarget(
+        appOverride: String?,
+        environment: [String: String],
+        permissions: PermissionProvider,
+        loadSession: (String) -> Session?,
+        resolvePID: (String) throws -> pid_t
+    ) -> KeyboardTarget {
+        resolveAppTarget(
+            appOverride: appOverride, environment: environment, permissions: permissions,
+            loadSession: loadSession, resolvePID: resolvePID,
+            noTargetDiagnostic: noMenuTargetDiagnostic
+        )
+    }
+
     /// Shared app-target resolution for the keyboard AND coordinate verbs. The
     /// permission gate (exit 2) is checked FIRST so it precedes every session/app
     /// resolution (pinned precedence 64 → 2 → 3 → 1; the usage-64 arg parse happens
@@ -438,7 +456,10 @@ public enum ActPipeline {
     /// success — so each verb keeps its own error mapping while the settle/persist/
     /// render invariants (persist-before-render; an unwritable path is exit 1) live
     /// in exactly one place.
-    private static func runInputVerb(
+    ///
+    /// Internal (not private) so the menu-path verb, which lives in its own file,
+    /// composes the SAME back half instead of restating these invariants.
+    static func runInputVerb(
         pid: pid_t,
         app: String,
         sessionPath: String,
@@ -537,6 +558,11 @@ public enum ActPipeline {
 
     static func noCoordinateTargetDiagnostic() -> String {
         "mtouch: no active snapshot session, so there is no app to act on. "
+            + "Run 'mtouch snapshot --app <bundleId>' first, or pass '--app <bundleId>'."
+    }
+
+    static func noMenuTargetDiagnostic() -> String {
+        "mtouch: no active snapshot session, so there is no app whose menus to drive. "
             + "Run 'mtouch snapshot --app <bundleId>' first, or pass '--app <bundleId>'."
     }
 

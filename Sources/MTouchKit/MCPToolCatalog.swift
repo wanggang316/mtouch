@@ -40,11 +40,11 @@ public enum MCPToolCatalog {
     }
 
     /// The verbs the `act` tool accepts, mirroring the CLI `act` grammar
-    /// (ref-based, coordinate-based, and keyboard verbs).
+    /// (ref-based, coordinate-based, keyboard, and menu-path verbs).
     public static let actVerbs = [
         "press", "focus", "show-menu", "set-value",
         "click", "rightclick", "doubleclick", "drag", "scroll",
-        "type", "key",
+        "type", "key", "menu",
     ]
 
     /// A reusable `--json` flag property.
@@ -63,8 +63,9 @@ public enum MCPToolCatalog {
             + "several running processes share the bundle id (the apps tool lists them)."
     )
 
-    /// The seven tools, in a stable order. EXACTLY this set is advertised by
-    /// `tools/list` — no more, no fewer.
+    /// The tools, in a stable order. EXACTLY this set is advertised by
+    /// `tools/list` — no more, no fewer. New tools are APPENDED so an existing
+    /// client's view of the earlier ones never shifts.
     public static let tools: [Spec] = [
         Spec(
             name: "snapshot",
@@ -83,7 +84,9 @@ public enum MCPToolCatalog {
             description: "Perform a UI action. Ref verbs (press, focus, show-menu, set-value) "
                 + "target an element reference from a prior snapshot; coordinate verbs "
                 + "(click, rightclick, doubleclick, drag, scroll) target screen points; "
-                + "keyboard verbs (type, key) target the focused element.",
+                + "keyboard verbs (type, key) target the focused element; menu invokes a "
+                + "menu-bar command by title path (the reliable way to drive an application "
+                + "whose content area is not exposed over the accessibility API).",
             properties: [
                 Property(name: "verb", type: "string",
                          description: "The action to perform.", enumValues: actVerbs),
@@ -103,6 +106,10 @@ public enum MCPToolCatalog {
                          description: "Literal text to type."),
                 Property(name: "combo", type: "string",
                          description: "Key combination for key, e.g. 'cmd+shift+t'."),
+                Property(name: "path", type: "string",
+                         description: "Menu title path for menu, '>'-separated, e.g. 'File>Save'. "
+                             + "Titles are user-visible and may be localized; they are matched "
+                             + "exactly first, then case-insensitively."),
                 Property(name: "app", type: "string",
                          description: "Bundle identifier override for coordinate/keyboard verbs."),
                 pidProperty,
@@ -170,6 +177,45 @@ public enum MCPToolCatalog {
             description: "Report environment health and permission (Accessibility, Screen Recording) status.",
             properties: [jsonProperty],
             required: []
+        ),
+        Spec(
+            name: "app",
+            description: "Control an application's lifecycle: launch it (reporting its pid), bring it "
+                + "frontmost (verified — it fails rather than reporting an activation that did not "
+                + "take), or quit it (waiting until its process is gone).",
+            properties: [
+                Property(name: "action", type: "string",
+                         description: "The lifecycle verb to perform.",
+                         enumValues: ["launch", "activate", "quit"]),
+                Property(name: "app", type: "string",
+                         description: "Bundle identifier of the target application."),
+                pidProperty,
+                Property(name: "waitReady", type: "string",
+                         description: "For launch: wait until the application reports at least one "
+                             + "window, e.g. 15s. Requires the Accessibility permission."),
+                Property(name: "force", type: "boolean",
+                         description: "For quit: force-terminate if the application does not quit "
+                             + "within timeout. DESTRUCTIVE — unsaved work is lost."),
+                Property(name: "timeout", type: "string",
+                         description: "For quit: how long to wait for a graceful quit (default 10s)."),
+                jsonProperty,
+            ],
+            required: ["action", "app"]
+        ),
+        Spec(
+            name: "clipboard",
+            description: "Read, write, or clear the clipboard's text — the reliable way to move text "
+                + "into an application whose text area is not addressable (write it here, then paste "
+                + "with act key cmd+v). Every write is read back and verified.",
+            properties: [
+                Property(name: "action", type: "string",
+                         description: "The clipboard verb to perform.",
+                         enumValues: ["get", "set", "clear"]),
+                Property(name: "text", type: "string",
+                         description: "Text to put on the clipboard (set)."),
+                jsonProperty,
+            ],
+            required: ["action"]
         ),
     ]
 

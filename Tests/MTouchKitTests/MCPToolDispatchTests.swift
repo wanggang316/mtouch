@@ -30,11 +30,15 @@ private func call(_ tool: String, _ args: [String: ToolArgumentValue],
 
 // MARK: - Catalog
 
+/// The advertised tool set, in catalog order. New tools are APPENDED so an
+/// existing client's view of the earlier ones never shifts.
+private let advertisedTools = [
+    "snapshot", "act", "wait", "screenshot", "apps", "windows", "doctor", "app", "clipboard",
+]
+
 @Suite struct MCPToolCatalogTests {
-    @Test func advertisesExactlyTheSevenTools() {
-        #expect(MCPToolCatalog.toolNames == [
-            "snapshot", "act", "wait", "screenshot", "apps", "windows", "doctor",
-        ])
+    @Test func advertisesExactlyTheDeclaredTools() {
+        #expect(MCPToolCatalog.toolNames == advertisedTools)
     }
 
     @Test func eachToolHasADescriptionAndProperties() {
@@ -57,12 +61,26 @@ private func call(_ tool: String, _ args: [String: ToolArgumentValue],
         #expect(spec("screenshot").required.isEmpty)
         #expect(spec("apps").required.isEmpty)
         #expect(spec("doctor").required.isEmpty)
+        #expect(spec("app").required == ["action", "app"])
+        #expect(spec("clipboard").required == ["action"])
+    }
+
+    /// The action-shaped tools constrain their verb to an enum, so a client cannot
+    /// invent one and discover the refusal only at call time.
+    @Test func lifecycleAndClipboardActionsAreEnumerated() throws {
+        let app = try #require(MCPToolCatalog.tools.first { $0.name == "app" })
+        let appAction = try #require(app.properties.first { $0.name == "action" })
+        #expect(appAction.enumValues == ["launch", "activate", "quit"])
+
+        let clipboard = try #require(MCPToolCatalog.tools.first { $0.name == "clipboard" })
+        let clipboardAction = try #require(clipboard.properties.first { $0.name == "action" })
+        #expect(clipboardAction.enumValues == ["get", "set", "clear"])
     }
 
     /// `--pid` parity: every app-scoped tool advertises an OPTIONAL integer `pid`,
     /// so an MCP client can disambiguate two instances exactly as the CLI does.
     @Test func appScopedToolsAdvertiseAnOptionalIntegerPid() throws {
-        for name in ["snapshot", "act", "wait", "windows"] {
+        for name in ["snapshot", "act", "wait", "windows", "app"] {
             let spec = try #require(MCPToolCatalog.tools.first { $0.name == name })
             let pid = try #require(spec.properties.first { $0.name == "pid" },
                                    "\(name) should advertise a pid property")
@@ -75,12 +93,10 @@ private func call(_ tool: String, _ args: [String: ToolArgumentValue],
 
     /// Adding a property must not add, rename, or remove a TOOL (VAL-MCP-002).
     @Test func addingPidChangesNoToolName() {
-        #expect(MCPToolCatalog.tools.count == 7)
-        #expect(Set(MCPToolCatalog.toolNames) == [
-            "snapshot", "act", "wait", "screenshot", "apps", "windows", "doctor",
-        ])
+        #expect(MCPToolCatalog.tools.count == advertisedTools.count)
+        #expect(Set(MCPToolCatalog.toolNames) == Set(advertisedTools))
         // Tools with no app argument gain nothing.
-        for name in ["screenshot", "apps", "doctor"] {
+        for name in ["screenshot", "apps", "doctor", "clipboard"] {
             let spec = MCPToolCatalog.tools.first { $0.name == name }
             #expect(spec?.properties.contains { $0.name == "pid" } == false)
         }
@@ -92,7 +108,7 @@ private func call(_ tool: String, _ args: [String: ToolArgumentValue],
         #expect(verb.enumValues == [
             "press", "focus", "show-menu", "set-value",
             "click", "rightclick", "doubleclick", "drag", "scroll",
-            "type", "key",
+            "type", "key", "menu",
         ])
     }
 }
@@ -288,6 +304,146 @@ private func call(_ tool: String, _ args: [String: ToolArgumentValue],
         let result = call("doctor", ["json": .bool(true)], permissions: axOnly)
         #expect(!result.isError)
         #expect(text(result) == DoctorReport(provider: axOnly).jsonString())
+    }
+
+    // MARK: act menu
+    //
+    // Only the argument-validation and permission paths are exercised here: a
+    // well-formed menu call would drive a real application's menu bar.
+
+    @Test func actMenuMissingPathIsInvalidArgs() {
+        let result = call("act", ["verb": .string("menu")])
+        #expect(result.isError)
+        #expect(text(result)?.contains("requires a 'path'") == true)
+    }
+
+    @Test func actMenuMalformedPathIsError() {
+        let result = call("act", ["verb": .string("menu"), "path": .string("File>>Save")])
+        #expect(result.isError)
+        #expect(text(result)?.contains("empty menu segment") == true)
+    }
+
+    @Test func actMenuUngrantedNamesAccessibility() {
+        let result = call("act", ["verb": .string("menu"), "path": .string("File>Save")],
+                          permissions: ungranted)
+        #expect(result.isError)
+        #expect(text(result) == PermissionError(permission: .accessibility).diagnostic)
+    }
+
+    // MARK: app
+
+    @Test func appMissingActionIsInvalidArgs() {
+        let result = call("app", ["app": .string("com.apple.TextEdit")])
+        #expect(result.isError)
+        #expect(text(result)?.contains("requires an 'action'") == true)
+    }
+
+    @Test func appMissingBundleIdIsInvalidArgs() {
+        let result = call("app", ["action": .string("launch")])
+        #expect(result.isError)
+        #expect(text(result)?.contains("requires an 'app'") == true)
+    }
+
+    @Test func appUnknownActionIsError() {
+        let result = call("app", ["action": .string("restart"), "app": .string("com.apple.TextEdit")])
+        #expect(result.isError)
+        #expect(text(result)?.contains("unknown action 'restart'") == true)
+    }
+
+    @Test func appLaunchRefusesAPidRatherThanIgnoringIt() {
+        // A pid cannot select an instance that does not exist yet, so silently
+        // dropping it would answer a question the client did not ask.
+        let result = call("app", ["action": .string("launch"), "app": .string("com.apple.TextEdit"),
+                                  "pid": .int(42)])
+        #expect(result.isError)
+        #expect(text(result)?.contains("does not apply to app launch") == true)
+    }
+
+    @Test func appLaunchBadWaitReadyIsInvalidArgs() {
+        let result = call("app", ["action": .string("launch"), "app": .string("com.apple.TextEdit"),
+                                  "waitReady": .string("soon")])
+        #expect(result.isError)
+        #expect(text(result)?.contains("waitReady") == true)
+    }
+
+    /// A non-running target fails in the SHARED resolver, so the payload is the
+    /// CLI's stderr line verbatim — and nothing is activated or terminated.
+    @Test func appActivateOfAMissingApplicationMatchesTheCLIDiagnostic() {
+        let result = call("app", ["action": .string("activate"), "app": .string("com.example.nope")],
+                          permissions: axOnly)
+        #expect(result.isError)
+        #expect(text(result) == AppNotRunningError(bundleId: "com.example.nope").message)
+    }
+
+    /// Activation is accessibility-driven end to end, so the grant gates it.
+    @Test func appActivateUngrantedNamesAccessibility() {
+        let result = call("app", ["action": .string("activate"), "app": .string("com.example.nope")],
+                          permissions: ungranted)
+        #expect(result.isError)
+        #expect(text(result) == PermissionError(permission: .accessibility).diagnostic)
+    }
+
+    @Test func appQuitOfAMissingApplicationMatchesTheCLIDiagnostic() {
+        let result = call("app", ["action": .string("quit"), "app": .string("com.example.nope")])
+        #expect(result.isError)
+        #expect(text(result) == AppNotRunningError(bundleId: "com.example.nope").message)
+    }
+
+    @Test func appQuitBadTimeoutIsInvalidArgs() {
+        let result = call("app", ["action": .string("quit"), "app": .string("com.example.nope"),
+                                  "timeout": .string("soon")])
+        #expect(result.isError)
+        #expect(text(result)?.contains("timeout") == true)
+    }
+
+    // MARK: clipboard
+    //
+    // Only the argument-validation paths are exercised: every other path would
+    // read or WRITE the real system pasteboard, which a test run must not clobber.
+
+    @Test func clipboardMissingActionIsInvalidArgs() {
+        let result = call("clipboard", [:])
+        #expect(result.isError)
+        #expect(text(result)?.contains("requires an 'action'") == true)
+    }
+
+    @Test func clipboardUnknownActionIsError() {
+        let result = call("clipboard", ["action": .string("paste")])
+        #expect(result.isError)
+        #expect(text(result)?.contains("unknown action 'paste'") == true)
+    }
+
+    @Test func clipboardSetWithoutTextIsInvalidArgs() {
+        let result = call("clipboard", ["action": .string("set")])
+        #expect(result.isError)
+        #expect(text(result)?.contains("requires a 'text'") == true)
+    }
+}
+
+// MARK: - Trajectory classification of the new tools
+
+@Suite struct MCPToolRecordClassTests {
+    @Test func lifecycleCallsAreRecordedAsActions() {
+        #expect(MCPToolDispatch.trajectoryKind(forTool: "app") == .action)
+    }
+
+    /// `clipboard` is the one tool whose record class depends on its arguments, so
+    /// `clipboard get` stays a READ on both surfaces (CLI parity) while the write
+    /// verbs are actions.
+    @Test func clipboardReadsAndWritesAreClassifiedByAction() {
+        #expect(MCPToolDispatch.trajectoryKind(
+            forTool: "clipboard", arguments: ToolArguments(["action": .string("get")])) == .read)
+        #expect(MCPToolDispatch.trajectoryKind(
+            forTool: "clipboard", arguments: ToolArguments(["action": .string("set")])) == .action)
+        #expect(MCPToolDispatch.trajectoryKind(
+            forTool: "clipboard", arguments: ToolArguments(["action": .string("clear")])) == .action)
+    }
+
+    @Test func theArgumentAwareClassifierAgreesWithTheNameOnlyOneElsewhere() {
+        for tool in ["snapshot", "act", "screenshot", "wait", "apps", "windows", "doctor", "app"] {
+            #expect(MCPToolDispatch.trajectoryKind(forTool: tool, arguments: ToolArguments())
+                == MCPToolDispatch.trajectoryKind(forTool: tool), "\(tool) must classify identically")
+        }
     }
 }
 
