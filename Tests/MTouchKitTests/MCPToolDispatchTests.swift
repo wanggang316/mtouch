@@ -133,6 +133,18 @@ private let advertisedTools = [
         #expect(of.description.contains("EVERY match"))
     }
 
+    /// The `act` tool mirrors the CLI's `--of` criteria target: an optional
+    /// string property on the SAME tool — no tool added or renamed, no change to
+    /// the required set (VAL-MCP-002).
+    @Test func actAdvertisesTheCriteriaTarget() throws {
+        let spec = try #require(MCPToolCatalog.tools.first { $0.name == "act" })
+        let of = try #require(spec.properties.first { $0.name == "of" })
+        #expect(of.type == "string")
+        // The single-match contract is documented where a client will read it.
+        #expect(of.description.contains("SINGLE"))
+        #expect(spec.required == ["verb"])
+    }
+
     @Test func actVerbEnumCoversTheGrammar() {
         let actSpec = MCPToolCatalog.tools.first { $0.name == "act" }!
         let verb = actSpec.properties.first { $0.name == "verb" }!
@@ -240,10 +252,53 @@ private let advertisedTools = [
         #expect(text(result)?.contains("unknown verb 'wiggle'") == true)
     }
 
-    @Test func actRefVerbMissingRefIsInvalidArgs() {
+    @Test func actRefVerbWithNoTargetNamesBothModes() {
+        // Neither ref nor of: the refusal teaches BOTH target modes, so an agent
+        // that only knew refs learns the criteria mode from the message itself.
         let result = call("act", ["verb": .string("press")])
         #expect(result.isError)
-        #expect(text(result)?.contains("requires a 'ref'") == true)
+        #expect(text(result)?.contains("exactly one target") == true)
+        #expect(text(result)?.contains("--of") == true)
+    }
+
+    @Test func actRefVerbRefusesRefAndOfTogether() {
+        let result = call("act", [
+            "verb": .string("press"), "ref": .string("e1"),
+            "of": .string("button \"Seven\""), "app": .string("com.example.App"),
+        ])
+        #expect(result.isError)
+        // The SAME grammar message the CLI's exit-64 refusal prints.
+        #expect(text(result)?.contains("cannot be combined with --of") == true)
+    }
+
+    @Test func actOfWithoutAppIsInvalidArgs() {
+        let result = call("act", ["verb": .string("press"), "of": .string("button \"Seven\"")])
+        #expect(result.isError)
+        #expect(text(result)?.contains("--of requires --app") == true)
+    }
+
+    @Test func actOfUngrantedNamesAccessibility() {
+        // A well-formed criteria target passes the usage gate, so the permission
+        // gate fires with the same pinned diagnostic as every other surface —
+        // proving the criteria mode routes into the pipeline.
+        let result = call("act", [
+            "verb": .string("press"), "of": .string("button \"Seven\""),
+            "app": .string("com.example.App"),
+        ], permissions: ungranted)
+        #expect(result.isError)
+        #expect(text(result) == PermissionError(permission: .accessibility).diagnostic)
+    }
+
+    @Test func actSetValueViaOfWithoutValueIsUsageError() {
+        // The payload rule outranks the permission gate (usage before permission),
+        // and the diagnostic names the --of form.
+        let result = call("act", [
+            "verb": .string("set-value"), "of": .string("textfield \"Name\""),
+            "app": .string("com.example.App"),
+        ], permissions: ungranted)
+        #expect(result.isError)
+        #expect(text(result)?.contains("requires a value") == true)
+        #expect(text(result)?.contains("--of") == true)
     }
 
     @Test func actRefVerbUngrantedNamesAccessibility() {

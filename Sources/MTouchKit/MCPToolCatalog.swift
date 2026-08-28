@@ -88,7 +88,8 @@ public enum MCPToolCatalog {
         Spec(
             name: "act",
             description: "Perform a UI action. Ref verbs (press, focus, show-menu, set-value) "
-                + "target an element reference from a prior snapshot; coordinate verbs "
+                + "target an element reference from a prior snapshot, or — via of — the single "
+                + "element matching a criteria, with no snapshot at all; coordinate verbs "
                 + "(click, rightclick, doubleclick, drag, scroll) target screen points; "
                 + "keyboard verbs (type, key) target the focused element; menu invokes a "
                 + "menu-bar command by title path (the reliable way to drive an application "
@@ -98,6 +99,12 @@ public enum MCPToolCatalog {
                          description: "The action to perform.", enumValues: actVerbs),
                 Property(name: "ref", type: "string",
                          description: "Element reference from a prior snapshot (ref verbs)."),
+                Property(name: "of", type: "string",
+                         description: "Criteria alternative to ref for the ref verbs: act on the SINGLE "
+                             + "element matching it (same grammar as wait/read, e.g. 'button \"Seven\"'), "
+                             + "resolved against a fresh walk — no snapshot needed. Requires app; mutually "
+                             + "exclusive with ref. Several matches, or none: the tool refuses and acts "
+                             + "on nothing."),
                 Property(name: "value", type: "string",
                          description: "Value payload for set-value."),
                 Property(name: "at", type: "string",

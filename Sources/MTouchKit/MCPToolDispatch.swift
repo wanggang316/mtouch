@@ -294,9 +294,6 @@ public enum MCPToolDispatch {
         switch verb {
         case "press", "focus", "show-menu", "set-value":
             if noVerify { return invalidArgs(UnverifiedDelivery.refVerbRefusal) }
-            guard let ref = args.string("ref") else {
-                return invalidArgs("act \(verb) requires a 'ref' argument (an element reference from a prior snapshot).")
-            }
             let actVerb: ActVerb
             switch verb {
             case "press": actVerb = .press
@@ -304,12 +301,30 @@ public enum MCPToolDispatch {
             case "show-menu": actVerb = .showMenu
             default: actVerb = .setValue
             }
+            // An empty string targets nothing, so it is treated as absent
+            // (mirroring `read`), and the target modes are mutually exclusive,
+            // enforced by the SAME grammar the CLI validates with — both surfaces
+            // refuse the same combinations with the same message.
+            let ref = nonEmpty(args.string("ref"))
+            let of = nonEmpty(args.string("of"))
+            if let message = ActTargetGrammar.selectionError(ref: ref, of: of, app: nonEmpty(app)) {
+                return invalidArgs(message)
+            }
             // A missing set-value payload is caught by the pipeline (usage error),
-            // reusing the CLI's exact diagnostic.
-            return fromAct(ActPipeline.run(
-                ref: ref, verb: actVerb, value: args.string("value"),
-                json: json, environment: environment, permissions: permissions
-            ))
+            // reusing the CLI's exact diagnostic in both modes.
+            switch ActTargetGrammar.makeMode(ref: ref, of: of, app: nonEmpty(app)) {
+            case let .ref(ref):
+                return fromAct(ActPipeline.run(
+                    ref: ref, verb: actVerb, value: args.string("value"),
+                    json: json, environment: environment, permissions: permissions
+                ))
+            case let .criteria(app, criteria):
+                return fromAct(ActPipeline.runCriteria(
+                    criteria: criteria, verb: actVerb, value: args.string("value"), app: app,
+                    json: json, environment: environment, permissions: permissions,
+                    resolvePID: resolvePID
+                ))
+            }
 
         case "click", "rightclick", "doubleclick", "scroll":
             guard let at = point(args, "at") else {

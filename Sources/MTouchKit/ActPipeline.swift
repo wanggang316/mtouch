@@ -223,6 +223,147 @@ public enum ActPipeline {
         }
     }
 
+    // MARK: - Criteria-targeted ref verbs (--of)
+
+    /// Resolve the app a criteria-targeted verb acts in. The set-value payload
+    /// rule (usage, exit 64) is decided from the arguments alone, so it precedes
+    /// the permission gate — the same order `resolveTarget` pins for a ref — and
+    /// the rest is the shared app resolution the keyboard/coordinate verbs use,
+    /// so `--app`/`--pid` fail with the same diagnostics everywhere.
+    static func resolveCriteriaTarget(
+        app: String,
+        verb: ActVerb,
+        value: String?,
+        environment: [String: String],
+        permissions: PermissionProvider,
+        loadSession: (String) -> Session?,
+        resolvePID: (String) throws -> pid_t
+    ) -> KeyboardTarget {
+        if verb == .setValue, value == nil {
+            return .terminal(.failed(
+                stderr: "mtouch: 'act set-value' requires a value: "
+                    + "mtouch act set-value --of <criteria> --app <bundleId> <value>.",
+                code: .usageError
+            ))
+        }
+        return resolveAppTarget(
+            appOverride: app, environment: environment, permissions: permissions,
+            loadSession: loadSession, resolvePID: resolvePID,
+            noTargetDiagnostic: noCriteriaTargetDiagnostic
+        )
+    }
+
+    /// Compose a criteria-targeted ref verb end-to-end: resolve the app → walk it
+    /// (retaining handles) → resolve the criteria to EXACTLY ONE actionable
+    /// element → perform the AX action → the SAME back half as every other input
+    /// verb (bounded settle → diff → persist). No session is required on the way
+    /// in — the criteria is matched against the pre-action walk itself, so a
+    /// scripted flow needs no snapshot and holds no ref that could go stale — and
+    /// the session written on the way out is the pipeline's normal one, so a
+    /// later ref-based act can still follow.
+    ///
+    /// Several matches are REFUSED (exit 1), never resolved to "the first one":
+    /// acting on a guessed element is the silent-misdelivery class this project
+    /// exists to prevent. Zero actionable matches is likewise exit 1, with the
+    /// non-actionable count called out when the criteria matched only inert
+    /// elements. The contrast with `read --of` (which returns every match) is
+    /// deliberate: reading many is safe, acting on many is not.
+    public static func runCriteria(
+        criteria: WaitCriteria,
+        verb: ActVerb,
+        value: String?,
+        app: String,
+        json: Bool,
+        environment: [String: String],
+        permissions: PermissionProvider = LivePermissionProvider(),
+        loadSession: (String) -> Session? = { SessionStore.load(from: $0) },
+        resolvePID: (String) throws -> pid_t = { try AXWindowEnumerator.resolveRunningPID(bundleId: $0) },
+        isRunning: (pid_t, String) -> Bool = { ActProcess.isRunning(pid: $0, bundleId: $1) },
+        walkLive: (pid_t) -> LiveElementTree? = { pid in BoundedWalk.run { LiveElementTree.walk(pid: pid) } },
+        rewalk: (pid_t) -> WalkResult? = { pid in BoundedWalk.run { AXTreeWalker.walk(pid: pid) } },
+        performAction: (AXUIElement, ActVerb, String?) -> Result<Void, AXActionFailure> = { AXAction.perform($0, $1, value: $2) },
+        persist: (Snapshot, String, pid_t, String) throws -> Void = { snapshot, app, pid, path in
+            try SessionStore.save(snapshot, app: app, pid: pid, to: path)
+        },
+        now: () -> TimeInterval = { ProcessInfo.processInfo.systemUptime },
+        sleep: (TimeInterval) -> Void = { Thread.sleep(forTimeInterval: $0) }
+    ) -> ActOutcome {
+        let pid: pid_t
+        let appName: String
+        let refs: [String: RefEntry]
+        let sessionPath: String
+        switch resolveCriteriaTarget(
+            app: app, verb: verb, value: value, environment: environment,
+            permissions: permissions, loadSession: loadSession, resolvePID: resolvePID
+        ) {
+        case let .terminal(outcome):
+            return outcome
+        case let .resolved(resolvedPID, resolvedApp, resolvedRefs, path):
+            pid = resolvedPID
+            appName = resolvedApp
+            refs = resolvedRefs
+            sessionPath = path
+        }
+
+        // Runtime (exit 1): the target process is gone.
+        guard isRunning(pid, appName) else {
+            return .failed(stderr: notRunningDiagnostic(app: appName, pid: pid), code: .runtimeFailure)
+        }
+
+        // Pre-action walk, retaining handles. The SAME walk resolves the criteria
+        // AND provides the diff baseline, so the element acted on is one the
+        // baseline provably contains. A bounded timeout on a wedged target
+        // surfaces as an explicit exit-1 diagnostic, never a hang.
+        guard let liveTree = walkLive(pid) else {
+            return .failed(stderr: inputTimeoutDiagnostic(app: appName, pid: pid), code: .runtimeFailure)
+        }
+
+        let match: ActCriteriaSelection.Match
+        switch ActCriteriaSelection.select(criteria, in: liveTree.nodes) {
+        case let .one(selected):
+            match = selected
+        case let .ambiguous(matches):
+            return .failed(
+                stderr: ambiguousCriteriaDiagnostic(criteria, app: appName, matches: matches),
+                code: .runtimeFailure
+            )
+        case let .none(nonActionable):
+            return .failed(
+                stderr: noCriteriaMatchDiagnostic(
+                    criteria, app: appName, roots: liveTree.nodes, nonActionable: nonActionable
+                ),
+                code: .runtimeFailure
+            )
+        }
+        guard let element = liveTree.elementsByPath[match.path] else {
+            // Every walked node records its handle, so this is unreachable in
+            // production; mapped for totality so a fixture gap cannot trap.
+            return .failed(
+                stderr: "mtouch: the element matching \(criteria.description) could not be reached; "
+                    + "nothing was acted on.",
+                code: .runtimeFailure
+            )
+        }
+
+        // Same back half as the ref verbs, including the menu-settle rule keyed
+        // off the MATCHED element's role.
+        let preSnapshot = Snapshot(roots: ScrollEnrichment.enrich(liveTree.nodes), refs: refs)
+        let expectsMenu = verb == .showMenu
+            || (verb == .press && MenuDescent.ownsSubmenu(ownerRole: match.node.role))
+        return runInputVerb(
+            pid: pid, app: appName, sessionPath: sessionPath,
+            preSnapshot: preSnapshot, expectsMenu: expectsMenu, json: json,
+            rewalk: rewalk, persist: persist, now: now, sleep: sleep
+        ) {
+            // Perform the action. An honest AX refusal (disabled control,
+            // non-settable value, non-focusable element) is exit 1 with no diff.
+            if case let .failure(failure) = performAction(element, verb, value) {
+                return .failed(stderr: "mtouch: \(failure.message)", code: .runtimeFailure)
+            }
+            return nil
+        }
+    }
+
     // MARK: - Keyboard verbs (type / key)
 
     /// The resolved app target, or a terminal outcome returned as-is. Shared by the
@@ -722,6 +863,54 @@ public enum ActPipeline {
     static func noMenuTargetDiagnostic() -> String {
         "mtouch: no active snapshot session, so there is no app whose menus to drive. "
             + "Run 'mtouch snapshot --app <bundleId>' first, or pass '--app <bundleId>'."
+    }
+
+    /// Unreachable from the CLI/MCP surfaces (`--of` requires `--app` before the
+    /// pipeline runs); kept total so the shared app resolver never traps.
+    static func noCriteriaTargetDiagnostic() -> String {
+        "mtouch: --of requires --app <bundleId> to name the application whose tree the criteria "
+            + "is matched in."
+    }
+
+    /// How many ambiguous matches the refusal lists before eliding the rest: enough
+    /// to disambiguate a keypad, few enough that a bare-role criteria over a busy
+    /// window cannot flood stderr.
+    static let maxListedMatches = 8
+
+    /// Exit 1 when the criteria matched SEVERAL actionable elements. The refusal
+    /// lists each match on its snapshot-text line (role, label with its @desc/@id
+    /// provenance, [disabled] where it applies) — exactly the strings a narrower
+    /// criteria would quote — and says how to narrow. Nothing is acted on.
+    static func ambiguousCriteriaDiagnostic(
+        _ criteria: WaitCriteria, app: String, matches: [ActCriteriaSelection.Match]
+    ) -> String {
+        let listed = matches.prefix(maxListedMatches).map { SnapshotText.line(for: $0.node, ref: nil, indent: 0) }
+        var message = "mtouch: \(criteria.description) matches \(matches.count) actionable elements in "
+            + "'\(app)'; acting on one of them would be a guess, so nothing was acted on. Matches: "
+            + listed.joined(separator: "; ")
+        if matches.count > listed.count {
+            message += "; ... and \(matches.count - listed.count) more"
+        }
+        return message + ". Narrow the criteria — quote a longer label, or the element's @id "
+            + "identifier — so exactly one element matches."
+    }
+
+    /// Exit 1 when no ACTIONABLE element matched. Echoes the criteria, summarizes
+    /// what WAS seen (the same summary a wait timeout reports), and advises the
+    /// same next steps as `read --of`'s zero-match diagnostic. A criteria that
+    /// matched only non-actionable elements (a static text, an inert group) says
+    /// so — that is a different correction than "no such element".
+    static func noCriteriaMatchDiagnostic(
+        _ criteria: WaitCriteria, app: String, roots: [AXNode], nonActionable: Int
+    ) -> String {
+        var message = "mtouch: no actionable element matching \(criteria.description) in '\(app)'."
+        if nonActionable > 0 {
+            message += " The criteria matched \(nonActionable) non-actionable element(s), which the "
+                + "act verbs cannot target."
+        }
+        return message + " Last seen: \(WaitPipeline.lastSeenSummary(roots)). "
+            + "Check the criteria against 'mtouch snapshot --app \(app)', or wait for the element "
+            + "first with 'mtouch wait --app \(app) --appears <criteria>'. Nothing was acted on."
     }
 
     static func offScreenDiagnostic(_ point: ScreenPoint) -> String {

@@ -44,14 +44,29 @@ struct VerifyOptions: ParsableArguments {
     var noVerify = false
 }
 
-/// Positional grammar shared by the ref-based verbs: `<ref> [<value>]`.
-/// Only set-value consumes `<value>`.
+/// Grammar shared by the ref-based verbs: `[<ref>] [<value>]` plus the criteria
+/// alternative `--of <criteria>`. Exactly one of `<ref>` / `--of` targets the
+/// element — validated in `runRefVerb`, where the verb is known (set-value's
+/// positional payload shifts slots in `--of` mode). Only set-value consumes
+/// `<value>`.
 struct RefActionArguments: ParsableArguments {
-    @Argument(help: ArgumentHelp("Element reference from a prior snapshot.", valueName: "ref"))
-    var ref: String
+    @Argument(help: ArgumentHelp(
+        "Element reference from a prior snapshot. Omit it to target by criteria with --of.",
+        valueName: "ref"
+    ))
+    var ref: String?
 
     @Argument(help: ArgumentHelp("Optional value payload (used by set-value).", valueName: "value"))
     var value: String?
+
+    @Option(help: ArgumentHelp(
+        "Act on the SINGLE element matching this criteria instead of a <ref> — no snapshot needed. "
+            + "Same grammar as wait/read: a role plus an optional quoted substring matched over "
+            + "title, value, description, and identifier, e.g. 'button \"Seven\"'. Requires --app. "
+            + "Several matches, or none: the command refuses (exit 1) and acts on nothing.",
+        valueName: "criteria"
+    ))
+    var of: String?
 
     @Flag(help: "Emit the resulting diff as machine-readable JSON.")
     var json = false
@@ -104,14 +119,28 @@ func report(_ outcome: ActOutcome) throws {
 /// stdout/stderr + exit code. The CLI layer stays thin: the resolve → re-locate →
 /// act → re-walk → diff → persist flow lives in `ActPipeline` so the coordinate
 /// and keyboard verbs (later features) reuse it.
+///
+/// The target grammar (exactly one of `<ref>` / `--of`; `--of` requires `--app`)
+/// is validated HERE rather than in `RefActionArguments.validate()` because only
+/// the verb knows whether the sole positional in `--of` mode is a stray ref or
+/// set-value's payload; a violation is still a usage error (exit 64) decided
+/// before any AX call.
 func runRefVerb(_ verb: ActVerb, _ arguments: RefActionArguments) throws {
+    let (ref, value) = ActTargetGrammar.normalizedPositionals(
+        ref: arguments.ref, value: arguments.value, of: arguments.of,
+        consumesValue: verb == .setValue
+    )
+    if let message = ActTargetGrammar.selectionError(ref: ref, of: arguments.of, app: arguments.appOptions.app) {
+        throw ValidationError(message)
+    }
     let environment = ProcessInfo.processInfo.environment
     let outcome = try recorded(
         command: "act",
         args: TrajectoryArgs.build([
             "verb": .string(verb.trajectoryName),
-            "ref": .string(arguments.ref),
-            "value": arguments.value.map(TrajectoryArgs.Value.string),
+            "ref": ref.map(TrajectoryArgs.Value.string),
+            "of": arguments.of.map(TrajectoryArgs.Value.string),
+            "value": value.map(TrajectoryArgs.Value.string),
             "json": arguments.json ? .bool(true) : nil,
             "app": arguments.appOptions.app.map(TrajectoryArgs.Value.string),
             "pid": arguments.appOptions.pid.map { .int(Int($0)) },
@@ -120,13 +149,28 @@ func runRefVerb(_ verb: ActVerb, _ arguments: RefActionArguments) throws {
         run: arguments.runOptions,
         describe: { (outcome: ActOutcome) in outcome.trajectoryInfo }
     ) {
-        ActPipeline.run(
-            ref: arguments.ref,
-            verb: verb,
-            value: arguments.value,
-            json: arguments.json,
-            environment: environment
-        )
+        switch ActTargetGrammar.makeMode(ref: ref, of: arguments.of, app: arguments.appOptions.app) {
+        case let .ref(ref):
+            return ActPipeline.run(
+                ref: ref,
+                verb: verb,
+                value: value,
+                json: arguments.json,
+                environment: environment
+            )
+        case let .criteria(app, criteria):
+            // `--pid` rides the pipeline's existing resolution seam (it applies
+            // only alongside `--app`; `OptionalAppOptions` rejects a lone pid).
+            return ActPipeline.runCriteria(
+                criteria: criteria,
+                verb: verb,
+                value: value,
+                app: app,
+                json: arguments.json,
+                environment: environment,
+                resolvePID: AppTarget.resolver(pid: arguments.appOptions.pid)
+            )
+        }
     }
     try report(outcome)
 }
