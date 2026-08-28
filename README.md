@@ -49,6 +49,12 @@ Measured against a streaming answer in a real application:
 ## Install
 
 ```sh
+brew install wanggang316/tap/mtouch
+```
+
+Or grab the release tarball directly:
+
+```sh
 VER=v0.2.1
 curl -fsSL -O "https://github.com/wanggang316/mtouch/releases/download/${VER}/mtouch-${VER}-macos-arm64.tar.gz"
 tar xzf "mtouch-${VER}-macos-arm64.tar.gz"
