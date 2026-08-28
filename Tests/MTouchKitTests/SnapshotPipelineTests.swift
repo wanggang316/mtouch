@@ -48,7 +48,10 @@ private func runPipeline(
     // Default: the app ANSWERED (no AX failure to report), so an empty tree keeps
     // its "explicitly marked empty" behavior. Injected so no test ever probes live AX.
     diagnoseEmptyTree: @escaping (pid_t) -> AXReadFailure? = { _ in nil },
-    persist: @escaping (Snapshot, String, pid_t, String) throws -> Void = { _, _, _, _ in }
+    persist: @escaping (Snapshot, String, pid_t, String) throws -> Void = { _, _, _, _ in },
+    // Default: ALIVE — the fixture pids are fabricated, so the liveness probe must
+    // never reach the real kernel (a pid that happens to exist would flip the verdict).
+    isAlive: @escaping (pid_t) -> Bool = { _ in true }
 ) -> SnapshotOutcome {
     SnapshotPipeline.run(
         bundleId: bundleId,
@@ -58,7 +61,8 @@ private func runPipeline(
         resolvePID: resolvePID,
         walk: walk,
         diagnoseEmptyTree: diagnoseEmptyTree,
-        persist: persist
+        persist: persist,
+        isAlive: isAlive
     )
 }
 

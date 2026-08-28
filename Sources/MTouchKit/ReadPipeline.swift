@@ -148,17 +148,27 @@ public enum ReadPipeline {
         }
 
         // A wedged target surfaces as an explicit bounded timeout, never a hang.
+        // Liveness is re-consulted at failure time, exactly as act does: a process
+        // that exited mid-command must read as app-gone, not "unresponsive".
         guard let liveTree = walkLive(pid) else {
+            guard isRunning(pid, app) else {
+                return .failed(stderr: ActPipeline.notRunningDiagnostic(app: app, pid: pid), code: .runtimeFailure)
+            }
             return .failed(stderr: ActPipeline.timeoutDiagnostic(app: app, pid: pid), code: .runtimeFailure)
         }
 
         // Re-locate the SAME element by its hints. A miss means the element is gone:
         // exit 3, exactly as act reports it — we never read the impostor now
-        // occupying that position.
+        // occupying that position. Unless the PROCESS is gone (its walk yields an
+        // empty/partial tree, so every ref misses): then the stale-ref advice would
+        // be wrong, and the failure is app-gone at exit 1, byte-identical to act.
         guard let path = ElementRelocation.locatePath(
                   entry, in: liveTree.attributesByPath, windowIDsByPath: liveTree.windowIDsByPath
               ),
               let node = node(at: path, in: liveTree.nodes) else {
+            guard isRunning(pid, app) else {
+                return .failed(stderr: ActPipeline.notRunningDiagnostic(app: app, pid: pid), code: .runtimeFailure)
+            }
             return .failed(stderr: ActPipeline.goneRefDiagnostic(ref), code: .refError)
         }
 
@@ -198,7 +208,8 @@ public enum ReadPipeline {
         permissions: PermissionProvider = LivePermissionProvider(),
         resolvePID: (String) throws -> pid_t = { try AXWindowEnumerator.resolveRunningPID(bundleId: $0) },
         walk: (pid_t) -> WalkResult? = { pid in BoundedWalk.run { AXTreeWalker.walk(pid: pid) } },
-        diagnoseEmptyTree: (pid_t) -> AXReadFailure? = { AXWindowEnumerator.readFailure(ofPID: $0) }
+        diagnoseEmptyTree: (pid_t) -> AXReadFailure? = { AXWindowEnumerator.readFailure(ofPID: $0) },
+        isAlive: (pid_t) -> Bool = { ProcessLiveness.isAlive($0) }
     ) -> ReadOutcome {
         // 1. Preflight FIRST (exit 2): a missing grant fails fast with the
         //    doctor-pointing diagnostic, never as an empty read.
@@ -225,15 +236,26 @@ public enum ReadPipeline {
         }
 
         // 3. A wedged target surfaces as an explicit bounded timeout, never a hang.
+        //    Liveness is consulted only once the walk has FAILED (never on the
+        //    happy path): a process that exited after resolution must read as
+        //    app-gone, not "unresponsive".
         guard let result = walk(pid) else {
+            guard isAlive(pid) else {
+                return .failed(stderr: AppGone.diagnostic(app: bundleId, pid: pid), code: .runtimeFailure)
+            }
             return .failed(stderr: appTimeoutDiagnostic(app: bundleId, pid: pid), code: .runtimeFailure)
         }
 
         // 4. NO roots at all is ambiguous — an app that exposes nothing looks exactly
         //    like one whose accessibility interface refused every read — so ask the
         //    app element directly and name a REFUSED read instead of reporting
-        //    "nothing matched" for a question that was never answered.
+        //    "nothing matched" for a question that was never answered. A refusal
+        //    from a DEAD process is not an AX condition at all — it is the process's
+        //    absence — so it is named as such rather than hedged as "unresponsive".
         if result.nodes.isEmpty, let failure = diagnoseEmptyTree(pid) {
+            guard isAlive(pid) else {
+                return .failed(stderr: AppGone.diagnostic(app: bundleId, pid: pid), code: .runtimeFailure)
+            }
             return .failed(
                 stderr: failure.diagnostic(reading: "the accessibility tree", of: bundleId),
                 code: .runtimeFailure

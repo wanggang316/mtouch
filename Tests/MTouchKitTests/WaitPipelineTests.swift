@@ -121,7 +121,8 @@ private func window(title: String, _ children: [AXNode] = []) -> AXNode {
             permissions: StubPermissions(accessibility: true),
             resolvePID: { _ in 42 },
             now: clock.now, sleep: clock.sleep,
-            makeProbe: { _, _ in { nil } }
+            makeProbe: { _, _ in { nil } },
+            isAlive: { _ in true }   // hung but ALIVE: keeps polling to timeout
         )
 
         guard case let .failed(_, code) = outcome else {

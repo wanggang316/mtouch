@@ -461,7 +461,8 @@ private func verdicts(
             permissions: StubPermissions(accessibility: true),
             resolvePID: { _ in 4242 },
             now: clock.now, sleep: clock.sleep,
-            makeProbe: { _, _ in { nil } }
+            makeProbe: { _, _ in { nil } },
+            isAlive: { _ in true }   // hung but ALIVE: keeps polling to timeout
         )
 
         guard case let .failed(stderr, code) = outcome else {

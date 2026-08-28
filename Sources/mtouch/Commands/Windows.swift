@@ -40,8 +40,10 @@ struct Windows: ParsableCommand {
                 switch outcome {
                 case .listed:
                     return TrajectoryOutcomeInfo(ok: true, exit: 0, errorClass: nil)
-                case let .failed(_, code):
-                    return TrajectoryOutcomeInfo(ok: false, exit: code.rawValue, errorClass: code.trajectoryErrorClass)
+                case let .failed(stderr, code):
+                    return TrajectoryOutcomeInfo(
+                        ok: false, exit: code.rawValue, errorClass: code.trajectoryErrorClass(stderr: stderr)
+                    )
                 }
             }
         ) { () -> Outcome in

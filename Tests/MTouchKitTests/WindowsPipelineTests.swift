@@ -101,7 +101,10 @@ private struct StubPermissions: PermissionProvider {
             bundleId: "com.google.Chrome", json: json,
             permissions: StubPermissions(accessibility: true),
             resolvePID: { _ in failure.pid },
-            enumerate: { _ in .failure(failure) }
+            enumerate: { _ in .failure(failure) },
+            // ALIVE: these cases pin the AX-failure wording for a target that still
+            // exists; the fixture pid must never reach the real kernel probe.
+            isAlive: { _ in true }
         )
     }
 

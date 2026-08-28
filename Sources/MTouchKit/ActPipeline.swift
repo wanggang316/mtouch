@@ -187,7 +187,13 @@ public enum ActPipeline {
 
         // Pre-action walk, retaining handles for re-location. A bounded timeout on
         // a wedged target surfaces as an explicit exit-1 diagnostic, never a hang.
+        // Liveness is re-consulted AT FAILURE TIME: the up-front gate above proves
+        // nothing about a process that exited mid-command, and "appears
+        // unresponsive" sends an agent waiting for an app that will never answer.
         guard let liveTree = walkLive(pid) else {
+            guard isRunning(pid, app) else {
+                return .failed(stderr: notRunningDiagnostic(app: app, pid: pid), code: .runtimeFailure)
+            }
             return .failed(stderr: inputTimeoutDiagnostic(app: app, pid: pid), code: .runtimeFailure)
         }
 
@@ -196,10 +202,18 @@ public enum ActPipeline {
         // the impostor now occupying that position. The live per-element window-id
         // map is passed so the owning-window gate can reject a same-hint element in
         // a DIFFERENT (even identically-titled) window (VAL-ACT-011).
+        //
+        // Unless the process itself has DIED: a walk of a dead pid yields an empty
+        // or partial tree, so every ref misses, and the stale-ref advice ("re-run
+        // 'mtouch snapshot'") would be actively wrong — a snapshot of a dead app
+        // cannot help. Dead ⇒ app-gone at exit 1; alive keeps exit 3 byte-identical.
         guard let path = ElementRelocation.locatePath(
                   entry, in: liveTree.attributesByPath, windowIDsByPath: liveTree.windowIDsByPath
               ),
               let element = liveTree.elementsByPath[path] else {
+            guard isRunning(pid, app) else {
+                return .failed(stderr: notRunningDiagnostic(app: app, pid: pid), code: .runtimeFailure)
+            }
             return .failed(stderr: goneRefDiagnostic(ref), code: .refError)
         }
 
@@ -216,7 +230,13 @@ public enum ActPipeline {
         ) {
             // Perform the action. An honest AX refusal (disabled control,
             // non-settable value, non-focusable element) is exit 1 with no diff.
+            // Measured live, a target killed mid-command surfaces HERE as a
+            // `cannotComplete` refusal — "may be disabled" would misdirect the
+            // agent toward the element, so a dead pid is diagnosed as app-gone.
             if case let .failure(failure) = performAction(element, verb, value) {
+                guard isRunning(pid, app) else {
+                    return .failed(stderr: notRunningDiagnostic(app: app, pid: pid), code: .runtimeFailure)
+                }
                 return .failed(stderr: "mtouch: \(failure.message)", code: .runtimeFailure)
             }
             return nil
@@ -918,9 +938,11 @@ public enum ActPipeline {
             + "no event was delivered. Re-derive coordinates from a fresh 'mtouch snapshot'."
     }
 
+    /// The app-gone diagnosis (see `AppGone`): one wording for the up-front gate
+    /// AND the failure-time consults, so "the target died" reads identically
+    /// whether it was discovered before the walk or behind a failed one.
     static func notRunningDiagnostic(app: String, pid: pid_t) -> String {
-        "mtouch: application '\(app)' (pid \(pid)) is no longer running. "
-            + "Relaunch it and re-run 'mtouch snapshot' to get fresh references."
+        AppGone.diagnostic(app: app, pid: pid)
     }
 
     static func timeoutDiagnostic(app: String, pid: pid_t) -> String {
@@ -957,6 +979,11 @@ public enum ActPipeline {
 /// "no longer running", so act never targets an impostor process.
 public enum ActProcess {
     public static func isRunning(pid: pid_t, bundleId: String) -> Bool {
+        // Kernel first (`kill(pid, 0)` semantics): the workspace's list is
+        // updated asynchronously, so for a few moments after an exit it can
+        // still describe the dead process — exactly the window in which the
+        // failure-time consults run. The kernel has no such lag.
+        guard ProcessLiveness.isAlive(pid) else { return false }
         guard let app = NSRunningApplication(processIdentifier: pid) else { return false }
         guard let running = app.bundleIdentifier else { return false }
         return running.caseInsensitiveCompare(bundleId) == .orderedSame

@@ -20,6 +20,9 @@ public enum WaitOutcome: Equatable, Sendable {
 /// permission gate (exit 2) precedes app resolution (exit 1), which precedes the
 /// poll (exit 0 on success, exit 4 on timeout). App-not-running and a missing
 /// grant both fail FAST — neither ever burns the timeout or masquerades as one.
+/// A target that dies MID-wait fails fast too (exit 1, app-gone): each failed
+/// poll whose walk observed nothing consults a liveness probe, so a dead process
+/// is reported the moment it is noticed instead of at the deadline.
 ///
 /// Each collaborator is injectable so the whole flow — including the timing
 /// bounds — is exercised without any AX/TCC access; the live defaults wire the
@@ -37,7 +40,8 @@ public enum WaitPipeline {
         makeProbe: (pid_t, TimeInterval) -> () -> [AXNode]? = { pid, deadline in
             let guarded = GuardedWalk(deadline: deadline, work: { AXTreeWalker.walk(pid: pid).nodes })
             return { guarded.sample() }
-        }
+        },
+        isAlive: (pid_t) -> Bool = { ProcessLiveness.isAlive($0) }
     ) -> WaitOutcome {
         // 1. Preflight FIRST (exit 2): a missing grant fails fast with the
         //    doctor-pointing diagnostic, never masquerading as a timeout.
@@ -81,15 +85,37 @@ public enum WaitPipeline {
         let probe = makeProbe(pid, walkDeadline)
         var lastSeen: [AXNode]?
 
+        // A target that DIES mid-poll must fail FAST at exit 1, never burn the
+        // timeout into a misleading exit 4: a walk of a dead pid yields nothing
+        // (nil, or an empty tree), so without a liveness consult the loop would
+        // keep polling a process that can never answer, ending in "Last seen:
+        // nothing" — which reads as a criteria problem, not a dead app. The
+        // consult runs ONLY on a failed poll whose walk observed nothing: a
+        // merely unresponsive-but-alive target keeps polling as today (that is
+        // exactly what `wait` is for), and a satisfiable poll never pays for it.
+        // The flag terminates `WaitPoll` early (its `met` is an artifact here),
+        // so elapsed stays honest: the wait ends at death detection.
+        var appGone = false
+
         // `.stable` is the one condition a single tree cannot decide, so it polls
         // through a `QuiescenceTracker` fed the scoped digest of each walk. The
         // tracker is a local `var` mutated by the (non-escaping) probe, so its
         // counters survive the loop and feed the exit-4 diagnostic.
         guard case let .stable(scope, window) = condition else {
             let result = WaitPoll.poll(timeout: timeout, interval: interval, now: now, sleep: sleep) {
-                guard let nodes = probe() else { return false }
+                guard let nodes = probe() else {
+                    if !isAlive(pid) { appGone = true; return true }
+                    return false
+                }
                 lastSeen = nodes
-                return WaitEvaluator.evaluate(condition, in: nodes)
+                // Evaluate FIRST: a condition an empty tree satisfies (e.g.
+                // --disappears) is met on its own terms, liveness notwithstanding.
+                if WaitEvaluator.evaluate(condition, in: nodes) { return true }
+                if nodes.isEmpty, !isAlive(pid) { appGone = true; return true }
+                return false
+            }
+            if appGone {
+                return .failed(stderr: AppGone.diagnostic(app: bundleId, pid: pid), code: .runtimeFailure)
             }
             if result.met { return .satisfied }
             return .failed(
@@ -105,9 +131,14 @@ public enum WaitPipeline {
             // A failed/hung walk observed NOTHING, which is not evidence of a
             // settled tree: nil restarts the quiet window (same as an absent scope).
             let digest = nodes.flatMap { WaitDigest.digest(of: $0, scopedTo: scope) }
-            return tracker.observe(digest: digest, at: now())
+            if tracker.observe(digest: digest, at: now()) { return true }
+            if nodes?.isEmpty ?? true, !isAlive(pid) { appGone = true; return true }
+            return false
         }
 
+        if appGone {
+            return .failed(stderr: AppGone.diagnostic(app: bundleId, pid: pid), code: .runtimeFailure)
+        }
         if result.met { return .satisfied }
         return .failed(
             stderr: quiescenceTimeoutDiagnostic(

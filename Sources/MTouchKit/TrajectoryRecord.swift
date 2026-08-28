@@ -274,6 +274,15 @@ public extension MTouchExitCode {
         case .usageError: return "usage"
         }
     }
+
+    /// The error class refined by the diagnostic itself: an app-gone failure
+    /// (the target process died — see `AppGone`) carries its own class so
+    /// trajectory records are machine-distinguishable from the generic `runtime`
+    /// bucket. Every other failure keeps the exit-code-derived class unchanged.
+    func trajectoryErrorClass(stderr: String) -> String? {
+        if self != .success, AppGone.describes(stderr) { return AppGone.errorClass }
+        return trajectoryErrorClass
+    }
 }
 
 // MARK: - Native outcome → TrajectoryOutcomeInfo (one mapping per surface)
@@ -283,8 +292,10 @@ public extension SnapshotOutcome {
         switch self {
         case .rendered:
             return TrajectoryOutcomeInfo(ok: true, exit: 0, errorClass: nil)
-        case let .failed(_, code):
-            return TrajectoryOutcomeInfo(ok: false, exit: code.rawValue, errorClass: code.trajectoryErrorClass)
+        case let .failed(stderr, code):
+            return TrajectoryOutcomeInfo(
+                ok: false, exit: code.rawValue, errorClass: code.trajectoryErrorClass(stderr: stderr)
+            )
         }
     }
 }
@@ -309,8 +320,10 @@ public extension ActOutcome {
             return TrajectoryOutcomeInfo(
                 ok: true, exit: 0, errorClass: nil, verified: false, deliveryConfirmed: false
             )
-        case let .failed(_, code):
-            return TrajectoryOutcomeInfo(ok: false, exit: code.rawValue, errorClass: code.trajectoryErrorClass)
+        case let .failed(stderr, code):
+            return TrajectoryOutcomeInfo(
+                ok: false, exit: code.rawValue, errorClass: code.trajectoryErrorClass(stderr: stderr)
+            )
         }
     }
 }
@@ -356,8 +369,10 @@ public extension ReadOutcome {
         switch self {
         case .read:
             return TrajectoryOutcomeInfo(ok: true, exit: 0, errorClass: nil)
-        case let .failed(_, code):
-            return TrajectoryOutcomeInfo(ok: false, exit: code.rawValue, errorClass: code.trajectoryErrorClass)
+        case let .failed(stderr, code):
+            return TrajectoryOutcomeInfo(
+                ok: false, exit: code.rawValue, errorClass: code.trajectoryErrorClass(stderr: stderr)
+            )
         }
     }
 }
@@ -367,8 +382,10 @@ public extension WaitOutcome {
         switch self {
         case .satisfied:
             return TrajectoryOutcomeInfo(ok: true, exit: 0, errorClass: nil)
-        case let .failed(_, code):
-            return TrajectoryOutcomeInfo(ok: false, exit: code.rawValue, errorClass: code.trajectoryErrorClass)
+        case let .failed(stderr, code):
+            return TrajectoryOutcomeInfo(
+                ok: false, exit: code.rawValue, errorClass: code.trajectoryErrorClass(stderr: stderr)
+            )
         }
     }
 }

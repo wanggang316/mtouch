@@ -28,7 +28,8 @@ public enum SnapshotPipeline {
         diagnoseEmptyTree: (pid_t) -> AXReadFailure? = { AXWindowEnumerator.readFailure(ofPID: $0) },
         persist: (Snapshot, String, pid_t, String) throws -> Void = { snapshot, app, pid, path in
             try SessionStore.save(snapshot, app: app, pid: pid, to: path)
-        }
+        },
+        isAlive: (pid_t) -> Bool = { ProcessLiveness.isAlive($0) }
     ) -> SnapshotOutcome {
         // 1. Preflight FIRST: without the grant, fail fast with the doctor-pointing
         //    diagnostic (exit 2). No stdout is produced on any failure path, so
@@ -58,7 +59,13 @@ public enum SnapshotPipeline {
 
         // 3. Walk under a hard deadline: a hung/SIGSTOPped target yields nil, which
         //    becomes an explicit bounded timeout diagnostic instead of a hang.
+        //    Liveness is consulted only once the walk has FAILED (never on the
+        //    happy path): a process that exited after resolution must read as
+        //    app-gone, not "unresponsive".
         guard let result = walk(pid) else {
+            guard isAlive(pid) else {
+                return .failed(stderr: AppGone.diagnostic(app: bundleId, pid: pid), code: .runtimeFailure)
+            }
             return .failed(stderr: timeoutDiagnostic(bundleId: bundleId, pid: pid), code: .runtimeFailure)
         }
 
@@ -69,7 +76,14 @@ public enum SnapshotPipeline {
         //     degenerate path) and, if the read is REFUSED, say so at exit 1 instead
         //     of printing an empty tree an agent would read as truth. A successful
         //     read keeps today's behavior: an explicitly-marked empty tree, exit 0.
+        //     A refusal from a DEAD process is not an AX condition at all — it is
+        //     the process's absence — so it is named as such (measured live, a
+        //     just-killed target yields `cannotComplete` here, and the generic
+        //     "unresponsive / retry with --pid" advice would be actively wrong).
         if result.nodes.isEmpty, let failure = diagnoseEmptyTree(pid) {
+            guard isAlive(pid) else {
+                return .failed(stderr: AppGone.diagnostic(app: bundleId, pid: pid), code: .runtimeFailure)
+            }
             return .failed(
                 stderr: failure.diagnostic(reading: "the accessibility tree", of: bundleId),
                 code: .runtimeFailure

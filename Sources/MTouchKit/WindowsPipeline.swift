@@ -27,7 +27,8 @@ public enum WindowsPipeline {
         json: Bool,
         permissions: PermissionProvider = LivePermissionProvider(),
         resolvePID: (String) throws -> pid_t = { try AXWindowEnumerator.resolveRunningPID(bundleId: $0) },
-        enumerate: (pid_t) -> Result<[WindowInfo], AXReadFailure> = { AXWindowEnumerator.windows(ofPID: $0) }
+        enumerate: (pid_t) -> Result<[WindowInfo], AXReadFailure> = { AXWindowEnumerator.windows(ofPID: $0) },
+        isAlive: (pid_t) -> Bool = { ProcessLiveness.isAlive($0) }
     ) -> WindowsOutcome {
         // 1. Preflight FIRST (exit 2): a missing grant fails fast with the
         //    doctor-pointing diagnostic.
@@ -57,11 +58,17 @@ public enum WindowsPipeline {
         // 3. Enumerate. A REFUSED read (exit 1) is not an empty listing: reporting
         //    "no windows" for an app whose accessibility interface would not answer
         //    hands an agent a falsehood it cannot detect, so the AX error is named.
+        //    A refusal from a DEAD process is the process's absence, not an AX
+        //    condition, so it is named as app-gone instead — liveness is consulted
+        //    only on this failure path, never on a successful listing.
         let windows: [WindowInfo]
         switch enumerate(pid) {
         case let .success(listed):
             windows = listed
         case let .failure(failure):
+            guard isAlive(pid) else {
+                return .failed(stderr: AppGone.diagnostic(app: bundleId, pid: pid), code: .runtimeFailure)
+            }
             return .failed(
                 stderr: failure.diagnostic(reading: "windows", of: bundleId),
                 code: .runtimeFailure

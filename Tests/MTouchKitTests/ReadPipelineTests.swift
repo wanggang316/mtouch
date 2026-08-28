@@ -367,7 +367,10 @@ private func readApp(
     bundleId: String = "com.example.App",
     resolvePID: (String) throws -> pid_t = { _ in 4242 },
     walk: ((pid_t) -> WalkResult?)? = nil,
-    diagnoseEmptyTree: (pid_t) -> AXReadFailure? = { _ in nil }
+    diagnoseEmptyTree: (pid_t) -> AXReadFailure? = { _ in nil },
+    // Default: ALIVE — the fixture pid is fabricated, so the liveness probe must
+    // never reach the real kernel (a pid that happens to exist would flip the verdict).
+    isAlive: (pid_t) -> Bool = { _ in true }
 ) -> ReadOutcome {
     ReadPipeline.runApp(
         bundleId: bundleId,
@@ -376,7 +379,8 @@ private func readApp(
         permissions: StubPermissions(accessibility: accessibility),
         resolvePID: resolvePID,
         walk: walk ?? { _ in walkResult(tree) },
-        diagnoseEmptyTree: diagnoseEmptyTree
+        diagnoseEmptyTree: diagnoseEmptyTree,
+        isAlive: isAlive
     )
 }
 
