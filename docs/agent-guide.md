@@ -36,6 +36,35 @@ mtouch read --app <id> --of 'scrollarea "编辑字段"'                  # match
 If the text you want is long, do not parse it out of a snapshot — the text tree has a node budget
 and drops non-actionable nodes past it. `read` never truncates.
 
+## Acting without refs at all
+
+For a SCRIPTED flow, skip snapshots entirely: the ref verbs accept the same criteria grammar.
+
+```sh
+mtouch act press --of 'button "Seven"'  --app com.apple.calculator
+mtouch act press --of 'button "乘"'      --app com.apple.calculator
+```
+
+The criteria resolves against the action's own pre-walk, so there is no ref to go stale. Multiplicity
+is the deliberate difference from `read --of`: reading many matches is safe, ACTING on many is
+misdelivery — so more than one actionable match is refused (exit 1, candidates listed) and zero
+matches is exit 1 with a `wait --appears` suggestion. Make the criteria specific.
+
+## Many steps, one process
+
+```sh
+mtouch batch <<'EOF'
+{"tool":"act","arguments":{"verb":"press","of":"button \"One\"","app":"com.apple.calculator"}}
+{"tool":"wait","arguments":{"app":"com.apple.calculator","appears":"button \"等于\"","timeout":"5s"}}
+{"tool":"read","arguments":{"app":"com.apple.calculator","of":"scrollarea \"编辑字段\""}}
+EOF
+```
+
+Steps are MCP-shaped tool calls, one JSON object per line. The WHOLE batch is validated before
+step 1 runs (a typo on line 3 executes nothing, exit 64); the first failing step stops it (exit 1);
+waiting between steps is just a `wait` step. Per-step exit-code taxonomy is preserved in the
+trajectory records. One process, one agent round-trip.
+
 ## Waiting
 
 Never sleep. Pick the weakest condition that actually means "ready":
@@ -134,7 +163,10 @@ uncertainty.
 `0` ok · `1` runtime · `2` permission · `3` ref · `4` wait timeout · `5` secure input · `64` usage.
 
 Two are recoverable without human help: **3** (re-snapshot and retry) and **4** (wait longer, or
-wait for a different condition). **2** means a permission is missing — run `mtouch doctor`. **64** is
+wait for a different condition). **A dead target is its own diagnosis**: if the app exited or
+crashed, every surface says so at exit 1 and suggests `mtouch app launch` — you will not see a
+misleading exit 3 (re-snapshotting will not resurrect a process) and `wait` fails fast instead of
+burning its timeout. **2** means a permission is missing — run `mtouch doctor`. **64** is
 your own invocation being wrong; the message names what.
 
 Measure exit codes directly. `cmd | head` reports `head`'s status, not the command's — a mistake

@@ -20,11 +20,13 @@ Three rules explain most of what follows.
 
 - **Perception** — walk an app's accessibility tree into compact, ref-annotated text (`e1`, `e2`, …) or stable JSON; noise-filtered, menu-collapsed, cycle-safe, Electron-aware, with secure-field values masked. Elements are labelled by title, value, **accessibility description, or identifier**, so controls that carry no title are still addressable.
 - **Reading** — `read` returns an element's **untruncated** text: by ref, by criteria (`--of`), or the whole app, for content the snapshot's node budget would drop.
-- **Action** — `press` / `focus` / `show-menu` / `set-value` by ref, `menu "File>Save"` by menu-bar path, plus `click` / `rightclick` / `doubleclick` / `drag` / `scroll` by coordinate and `type` / `key` via CGEvent. Every action returns an **AX diff** as built-in verification.
+- **Action** — `press` / `focus` / `show-menu` / `set-value` by ref **or by criteria** (`--of 'button "Seven"'` — a scripted flow needs no snapshot and no refs, and an ambiguous match is refused, never guessed), `menu "File>Save"` by menu-bar path, plus `click` / `rightclick` / `doubleclick` / `drag` / `scroll` by coordinate and `type` / `key` via CGEvent. Every action returns an **AX diff** as built-in verification.
 - **App control** — `app launch` / `activate` / `quit` with polled readiness and **verified** activation, plus `clipboard get` / `set` / `clear` with a read-back check.
 - **Synchronization** — `wait --appears/--disappears/--text/--value-equals`, and `--stable` **quiescence**: wait until a streaming or animating region stops changing.
 - **Vision fallback** — `screenshot` via ScreenCaptureKit (full screen or per-window by `CGWindowID`), for AX-opaque apps.
 - **Evidence** — `MTOUCH_RUN_DIR` collects `run.json`, a JSONL trajectory, per-step stills and a screen recording; `mtouch report` renders them into one offline, deterministic HTML page.
+- **Throughput** — `mtouch batch` executes many MCP-shaped tool-call steps in ONE process (a typo anywhere refuses the whole batch before step 1; the first failing step stops it). Measured: an 8-press flow drops from ~1.65s across 8 processes to ~1.17s, and 10 agent round-trips become 1.
+- **Failure honesty** — a DEAD target is diagnosed as dead (exit 1, "relaunch it"), never as a stale element (exit 3, "re-snapshot") or a burned timeout; `wait` fails fast when its target dies mid-poll.
 - **Agent surface** — an **MCP (Model Context Protocol) stdio server** (`mtouch mcp`) exposing every capability with payloads byte-identical to the CLI. Zero network endpoints.
 
 ### Why `--stable` exists
@@ -47,7 +49,7 @@ Measured against a streaming answer in a real application:
 ## Install
 
 ```sh
-VER=v0.2.0
+VER=v0.2.1
 curl -fsSL -O "https://github.com/wanggang316/mtouch/releases/download/${VER}/mtouch-${VER}-macos-arm64.tar.gz"
 tar xzf "mtouch-${VER}-macos-arm64.tar.gz"
 ./mtouch-${VER}-macos-arm64/mtouch doctor
@@ -109,7 +111,7 @@ While a recording is live, mtouch takes **no** second screen capture — step st
 swift build
 swift test                    # hermetic unit tests (no AX/TCC/network/display)
 make release                  # arm64 release binary
-make package VERSION=v0.2.0   # -> mtouch-v0.2.0-macos-arm64.tar.gz (+ .sha256)
+make package VERSION=v0.2.1   # -> mtouch-v0.2.0-macos-arm64.tar.gz (+ .sha256)
 make ungranted                # ungranted-persona live probes
 ```
 
