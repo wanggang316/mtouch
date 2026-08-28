@@ -20,7 +20,7 @@ Three rules explain most of what follows.
 
 - **Perception** — walk an app's accessibility tree into compact, ref-annotated text (`e1`, `e2`, …) or stable JSON; noise-filtered, menu-collapsed, cycle-safe, Electron-aware, with secure-field values masked. Elements are labelled by title, value, **accessibility description, or identifier**, so controls that carry no title are still addressable.
 - **Reading** — `read` returns an element's **untruncated** text: by ref, by criteria (`--of`), or the whole app, for content the snapshot's node budget would drop.
-- **Action** — `press` / `focus` / `show-menu` / `set-value` by ref **or by criteria** (`--of 'button "Seven"'` — a scripted flow needs no snapshot and no refs, and an ambiguous match is refused, never guessed), `menu "File>Save"` by menu-bar path, plus `click` / `rightclick` / `doubleclick` / `drag` / `scroll` by coordinate and `type` / `key` via CGEvent. Every action returns an **AX diff** as built-in verification.
+- **Action** — `press` / `focus` / `show-menu` / `set-value` by ref **or by criteria** (`--of 'button "Seven"' --wait 5s` — a scripted flow needs no snapshot and no refs; the optional wait polls until the target resolves, and an ambiguous match is refused, never guessed), `menu "File>Save"` by menu-bar path, plus `click` / `rightclick` / `doubleclick` / `drag` / `scroll` by coordinate and `type` / `key` via CGEvent. Every action returns an **AX diff** as built-in verification.
 - **App control** — `app launch` / `activate` / `quit` with polled readiness and **verified** activation, plus `clipboard get` / `set` / `clear` with a read-back check.
 - **Synchronization** — `wait --appears/--disappears/--text/--value-equals`, and `--stable` **quiescence**: wait until a streaming or animating region stops changing.
 - **Vision fallback** — `screenshot` via ScreenCaptureKit (full screen or per-window by `CGWindowID`), for AX-opaque apps.
@@ -50,12 +50,15 @@ Measured against a streaming answer in a real application:
 
 ```sh
 brew install wanggang316/tap/mtouch
+mtouch init --client claude    # register the MCP server + install agent instructions
 ```
+
+`mtouch init` with no arguments lists what it would do and changes nothing; `--print` dry-runs it. Running it twice is safe — an existing registration is left alone, and a *differing* one is reported rather than silently overwritten.
 
 Or grab the release tarball directly:
 
 ```sh
-VER=v0.2.1
+VER=v0.2.2
 curl -fsSL -O "https://github.com/wanggang316/mtouch/releases/download/${VER}/mtouch-${VER}-macos-arm64.tar.gz"
 tar xzf "mtouch-${VER}-macos-arm64.tar.gz"
 ./mtouch-${VER}-macos-arm64/mtouch doctor
@@ -117,7 +120,7 @@ While a recording is live, mtouch takes **no** second screen capture — step st
 swift build
 swift test                    # hermetic unit tests (no AX/TCC/network/display)
 make release                  # arm64 release binary
-make package VERSION=v0.2.1   # -> mtouch-v0.2.0-macos-arm64.tar.gz (+ .sha256)
+make package VERSION=v0.2.2   # -> mtouch-v0.2.0-macos-arm64.tar.gz (+ .sha256)
 make ungranted                # ungranted-persona live probes
 ```
 

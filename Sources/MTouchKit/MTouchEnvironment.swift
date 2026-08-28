@@ -17,5 +17,5 @@ public enum MTouchEnvironment {
 /// (currently a run bundle's `run.json`), so a bundle names the binary that
 /// produced it.
 public enum MTouchVersion {
-    public static let current = "0.2.1"
+    public static let current = "0.2.2"
 }

@@ -41,7 +41,7 @@ contains() {
 echo "== CLI surface =="
 check "--help succeeds" 0 "$MTOUCH" --help
 "$MTOUCH" --help >/tmp/help.txt 2>&1
-for sub in doctor apps app windows snapshot read act wait clipboard screenshot record report mcp; do
+for sub in init doctor apps app windows snapshot read act wait clipboard screenshot record report mcp batch; do
   contains "--help lists '$sub'" "  $sub" /tmp/help.txt
 done
 

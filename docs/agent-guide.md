@@ -45,6 +45,18 @@ mtouch act press --of 'button "Seven"'  --app com.apple.calculator
 mtouch act press --of 'button "乘"'      --app com.apple.calculator
 ```
 
+Add `--wait <duration>` when the element is not there yet — the action polls until the criteria
+resolves, so a multi-screen flow needs no separate `wait` step:
+
+```sh
+mtouch act press --of 'button "Save"' --wait 5s --app <id>
+```
+
+On expiry the diagnostic distinguishes **never appeared** from **was ambiguous, here are the
+candidates** — two different corrections. A target that dies mid-wait fails fast (exit 1 app-gone)
+instead of burning the timeout, and a wedged-but-alive target is exit 1 too, because waiting longer
+cannot help it. Without `--wait`, zero matches stays exit 1; with it, expiry is exit 4.
+
 The criteria resolves against the action's own pre-walk, so there is no ref to go stale. Multiplicity
 is the deliberate difference from `read --of`: reading many matches is safe, ACTING on many is
 misdelivery — so more than one actionable match is refused (exit 1, candidates listed) and zero
