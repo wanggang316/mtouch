@@ -6,6 +6,7 @@ struct MTouch: ParsableCommand {
         commandName: "mtouch",
         abstract: "Agent-facing macOS UI automation CLI.",
         subcommands: [
+            Init.self,
             Doctor.self,
             Apps.self,
             App.self,
