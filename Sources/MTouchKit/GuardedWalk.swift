@@ -12,10 +12,16 @@ import Foundation
 /// A healthy walk completes within `deadline`, resets the in-flight flag, and
 /// each subsequent poll spawns a fresh short-lived task — so the cap only ever
 /// bites on an unresponsive target.
-public final class GuardedWalk: @unchecked Sendable {
+///
+/// Generic over the SAMPLE a walk yields, because the two pollers need different
+/// readings of the same tree: `wait` only evaluates a condition, so it samples the
+/// derived `[AXNode]`, while a `--wait`-paced criteria act must ACT on what it
+/// matched, so it samples a handle-bearing `LiveElementTree`. The single-flight
+/// discipline is identical either way, so it lives here once.
+public final class GuardedWalk<Sample: Sendable>: @unchecked Sendable {
     private let queue: DispatchQueue
     private let deadline: TimeInterval
-    private let work: @Sendable () -> [AXNode]?
+    private let work: @Sendable () -> Sample?
 
     private let lock = NSLock()
     private var inFlight = false
@@ -30,7 +36,7 @@ public final class GuardedWalk: @unchecked Sendable {
 
     public init(
         deadline: TimeInterval = BoundedWalk.defaultDeadline,
-        work: @escaping @Sendable () -> [AXNode]?
+        work: @escaping @Sendable () -> Sample?
     ) {
         self.queue = DispatchQueue(label: "com.mtouch.guarded-walk", qos: .userInitiated)
         self.deadline = deadline
@@ -40,7 +46,7 @@ public final class GuardedWalk: @unchecked Sendable {
     /// One poll's sample: the freshest tree read within `deadline`, or nil when a
     /// walk is already in flight (hung target) or this walk itself exceeds the
     /// deadline. Never spawns a second concurrent walk.
-    public func sample() -> [AXNode]? {
+    public func sample() -> Sample? {
         lock.lock()
         if inFlight {
             // A previous walk is still running (hung): do NOT spawn another.
@@ -75,8 +81,8 @@ public final class GuardedWalk: @unchecked Sendable {
     /// the read only after a successful `wait()`.
     private final class ResultBox: @unchecked Sendable {
         private let lock = NSLock()
-        private var value: [AXNode]?
-        func set(_ newValue: [AXNode]?) { lock.lock(); value = newValue; lock.unlock() }
-        func get() -> [AXNode]? { lock.lock(); defer { lock.unlock() }; return value }
+        private var value: Sample?
+        func set(_ newValue: Sample?) { lock.lock(); value = newValue; lock.unlock() }
+        func get() -> Sample? { lock.lock(); defer { lock.unlock() }; return value }
     }
 }

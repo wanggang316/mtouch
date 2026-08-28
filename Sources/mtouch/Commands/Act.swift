@@ -68,6 +68,25 @@ struct RefActionArguments: ParsableArguments {
     ))
     var of: String?
 
+    @Option(help: ArgumentHelp(
+        "Wait up to this long for --of to match exactly one actionable element, then act on it — "
+            + "one command instead of 'mtouch wait --appears <criteria>' followed by the act, with "
+            + "the criteria written once. Durations: 5s, 500ms, or a bare number of seconds. "
+            + "Requires --of (a <ref> addresses a snapshot already taken, so there is nothing to "
+            + "wait for: exit 64). SEVERAL matches keep waiting too — duplicates are often transient "
+            + "while a screen renders — and on expiry the diagnostic says whether the criteria never "
+            + "appeared or was ambiguous. Expiry is exit 4; WITHOUT --wait, zero matches stays exit 1 "
+            + "as it always has. A target that dies mid-wait fails immediately (exit 1).",
+        valueName: "duration"
+    ))
+    var wait: WaitDuration?
+
+    @Option(help: ArgumentHelp(
+        "Polling interval for --wait (default 100ms). Only valid together with --wait.",
+        valueName: "duration"
+    ))
+    var interval: WaitDuration?
+
     @Flag(help: "Emit the resulting diff as machine-readable JSON.")
     var json = false
 
@@ -130,7 +149,10 @@ func runRefVerb(_ verb: ActVerb, _ arguments: RefActionArguments) throws {
         ref: arguments.ref, value: arguments.value, of: arguments.of,
         consumesValue: verb == .setValue
     )
-    if let message = ActTargetGrammar.selectionError(ref: ref, of: arguments.of, app: arguments.appOptions.app) {
+    if let message = ActTargetGrammar.selectionError(
+        ref: ref, of: arguments.of, app: arguments.appOptions.app,
+        hasWait: arguments.wait != nil, hasInterval: arguments.interval != nil
+    ) {
         throw ValidationError(message)
     }
     let environment = ProcessInfo.processInfo.environment
@@ -140,6 +162,11 @@ func runRefVerb(_ verb: ActVerb, _ arguments: RefActionArguments) throws {
             "verb": .string(verb.trajectoryName),
             "ref": ref.map(TrajectoryArgs.Value.string),
             "of": arguments.of.map(TrajectoryArgs.Value.string),
+            // Recorded beside `of` so a record shows whether a wait was in play —
+            // "it worked" and "it worked once the screen caught up" are different
+            // facts about a flow.
+            "wait": arguments.wait.map { .double($0.seconds) },
+            "interval": arguments.interval.map { .double($0.seconds) },
             "value": value.map(TrajectoryArgs.Value.string),
             "json": arguments.json ? .bool(true) : nil,
             "app": arguments.appOptions.app.map(TrajectoryArgs.Value.string),
@@ -166,6 +193,8 @@ func runRefVerb(_ verb: ActVerb, _ arguments: RefActionArguments) throws {
                 verb: verb,
                 value: value,
                 app: app,
+                wait: arguments.wait?.seconds,
+                interval: arguments.interval?.seconds,
                 json: arguments.json,
                 environment: environment,
                 resolvePID: AppTarget.resolver(pid: arguments.appOptions.pid)

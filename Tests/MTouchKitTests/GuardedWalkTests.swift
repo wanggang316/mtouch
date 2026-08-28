@@ -23,7 +23,7 @@ import Testing
         let guarded = GuardedWalk(deadline: 0.05, work: {
             release.wait()   // block as if the target is unresponsive
             drained.signal() // let the test observe the hung walk actually unblocked
-            return []
+            return [AXNode]()
         })
 
         for _ in 0..<25 {

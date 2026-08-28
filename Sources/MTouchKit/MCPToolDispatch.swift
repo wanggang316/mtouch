@@ -290,6 +290,21 @@ public enum MCPToolDispatch {
         // verbs that must read the tree to find their target, with the SAME pinned
         // wording the CLI's exit-64 refusal prints.
         let noVerify = args.bool("noVerify") ?? false
+        // `wait`/`interval` pace the CRITERIA resolution of a ref verb. A
+        // coordinate, keyboard, or menu verb has no criteria to wait for, so they
+        // are refused rather than silently ignored — the CLI has no such option on
+        // those verbs at all (its parser refuses them, exit 64), and an argument
+        // that quietly does nothing is the silent-wrong-answer class this project
+        // exists to prevent. Checked only for a KNOWN verb, so an unknown one still
+        // gets the unknown-verb message first.
+        if MCPToolCatalog.actVerbs.contains(verb), !MCPToolCatalog.criteriaVerbs.contains(verb),
+           args.isPresent("wait") || args.isPresent("interval") {
+            return invalidArgs(
+                "'wait' and 'interval' apply only to the verbs that target by criteria ("
+                    + MCPToolCatalog.criteriaVerbs.joined(separator: ", ")
+                    + "); act \(verb) has no criteria to wait for."
+            )
+        }
 
         switch verb {
         case "press", "focus", "show-menu", "set-value":
@@ -307,8 +322,29 @@ public enum MCPToolDispatch {
             // refuse the same combinations with the same message.
             let ref = nonEmpty(args.string("ref"))
             let of = nonEmpty(args.string("of"))
-            if let message = ActTargetGrammar.selectionError(ref: ref, of: of, app: nonEmpty(app)) {
+            let waitRaw = nonEmpty(args.string("wait"))
+            let intervalRaw = nonEmpty(args.string("interval"))
+            if let message = ActTargetGrammar.selectionError(
+                ref: ref, of: of, app: nonEmpty(app),
+                hasWait: waitRaw != nil, hasInterval: intervalRaw != nil
+            ) {
                 return invalidArgs(message)
+            }
+            // Durations are parsed here, where a malformed one is an invalid-argument
+            // result — the analogue of the CLI's parse-time usage error (exit 64).
+            var wait: TimeInterval?
+            if let waitRaw {
+                guard let parsed = WaitDuration(parsing: waitRaw) else {
+                    return invalidArgs("'wait' must be a valid duration (e.g. 5s, 500ms).")
+                }
+                wait = parsed.seconds
+            }
+            var interval: TimeInterval?
+            if let intervalRaw {
+                guard let parsed = WaitDuration(parsing: intervalRaw) else {
+                    return invalidArgs("'interval' must be a valid duration (e.g. 100ms).")
+                }
+                interval = parsed.seconds
             }
             // A missing set-value payload is caught by the pipeline (usage error),
             // reusing the CLI's exact diagnostic in both modes.
@@ -321,6 +357,7 @@ public enum MCPToolDispatch {
             case let .criteria(app, criteria):
                 return fromAct(ActPipeline.runCriteria(
                     criteria: criteria, verb: actVerb, value: args.string("value"), app: app,
+                    wait: wait, interval: interval,
                     json: json, environment: environment, permissions: permissions,
                     resolvePID: resolvePID
                 ))

@@ -47,6 +47,11 @@ public enum MCPToolCatalog {
         "type", "key", "menu",
     ]
 
+    /// The subset of `actVerbs` that can target an element BY CRITERIA (`of`), and
+    /// therefore the only ones for which `wait`/`interval` mean anything: the rest
+    /// address screen points, the focused element, or a menu title path.
+    public static let criteriaVerbs = ["press", "focus", "show-menu", "set-value"]
+
     /// A reusable `--json` flag property.
     private static let jsonProperty = Property(
         name: "json", type: "boolean",
@@ -105,6 +110,17 @@ public enum MCPToolCatalog {
                              + "resolved against a fresh walk — no snapshot needed. Requires app; mutually "
                              + "exclusive with ref. Several matches, or none: the tool refuses and acts "
                              + "on nothing."),
+                Property(name: "wait", type: "string",
+                         description: "Wait up to this long (e.g. 5s, 500ms) for 'of' to match exactly "
+                             + "one actionable element, then act on it — one call instead of a wait "
+                             + "followed by an act, with the criteria written once. Requires of; a ref "
+                             + "addresses a snapshot already taken, so there is nothing to wait for. "
+                             + "SEVERAL matches keep waiting too (duplicates are often transient while a "
+                             + "screen renders); on expiry the error says whether the criteria never "
+                             + "appeared or was ambiguous, and lists the candidates when it was. Without "
+                             + "wait, zero or several matches refuse immediately as they always have."),
+                Property(name: "interval", type: "string",
+                         description: "Polling interval for wait (default 100ms). Requires wait."),
                 Property(name: "value", type: "string",
                          description: "Value payload for set-value."),
                 Property(name: "at", type: "string",

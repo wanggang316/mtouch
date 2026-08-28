@@ -288,11 +288,20 @@ public enum ActPipeline {
     /// non-actionable count called out when the criteria matched only inert
     /// elements. The contrast with `read --of` (which returns every match) is
     /// deliberate: reading many is safe, acting on many is not.
+    ///
+    /// `wait` opts the resolution into a BOUNDED poll (see
+    /// `resolveCriteriaElement`) so a flow need not spell its criteria twice, once
+    /// for a `wait --appears` and once for the act. It changes only the FRONT half:
+    /// once one actionable element is resolved, the settle → diff → persist tail
+    /// below is the same tail every other act verb runs. Without it, every verdict
+    /// and every exit code is exactly what it was before the option existed.
     public static func runCriteria(
         criteria: WaitCriteria,
         verb: ActVerb,
         value: String?,
         app: String,
+        wait: TimeInterval? = nil,
+        interval: TimeInterval? = nil,
         json: Bool,
         environment: [String: String],
         permissions: PermissionProvider = LivePermissionProvider(),
@@ -300,6 +309,15 @@ public enum ActPipeline {
         resolvePID: (String) throws -> pid_t = { try AXWindowEnumerator.resolveRunningPID(bundleId: $0) },
         isRunning: (pid_t, String) -> Bool = { ActProcess.isRunning(pid: $0, bundleId: $1) },
         walkLive: (pid_t) -> LiveElementTree? = { pid in BoundedWalk.run { LiveElementTree.walk(pid: pid) } },
+        // The POLLED walk is its own seam, and a single-flight `GuardedWalk` rather
+        // than a per-poll `BoundedWalk.run`: a hung target must not accumulate one
+        // abandoned walk per poll inside a long-lived process (an MCP server, a
+        // `batch` run). The one-shot `walkLive` above is untouched, so the no-wait
+        // path keeps its exact behaviour.
+        makeWaitProbe: (pid_t, TimeInterval) -> () -> LiveElementTree? = { pid, deadline in
+            let guarded = GuardedWalk(deadline: deadline, work: { LiveElementTree.walk(pid: pid) })
+            return { guarded.sample() }
+        },
         rewalk: (pid_t) -> WalkResult? = { pid in BoundedWalk.run { AXTreeWalker.walk(pid: pid) } },
         performAction: (AXUIElement, ActVerb, String?) -> Result<Void, AXActionFailure> = { AXAction.perform($0, $1, value: $2) },
         persist: (Snapshot, String, pid_t, String) throws -> Void = { snapshot, app, pid, path in
@@ -330,30 +348,23 @@ public enum ActPipeline {
             return .failed(stderr: notRunningDiagnostic(app: appName, pid: pid), code: .runtimeFailure)
         }
 
-        // Pre-action walk, retaining handles. The SAME walk resolves the criteria
-        // AND provides the diff baseline, so the element acted on is one the
-        // baseline provably contains. A bounded timeout on a wedged target
-        // surfaces as an explicit exit-1 diagnostic, never a hang.
-        guard let liveTree = walkLive(pid) else {
-            return .failed(stderr: inputTimeoutDiagnostic(app: appName, pid: pid), code: .runtimeFailure)
-        }
-
+        // Resolve the criteria to EXACTLY ONE actionable element — one walk, or a
+        // bounded poll of the same resolution when `wait` was asked for. The walk
+        // the element came from is returned with it, because it is also the diff
+        // baseline: the element acted on is one the baseline provably contains.
+        let liveTree: LiveElementTree
         let match: ActCriteriaSelection.Match
-        switch ActCriteriaSelection.select(criteria, in: liveTree.nodes) {
-        case let .one(selected):
-            match = selected
-        case let .ambiguous(matches):
-            return .failed(
-                stderr: ambiguousCriteriaDiagnostic(criteria, app: appName, matches: matches),
-                code: .runtimeFailure
-            )
-        case let .none(nonActionable):
-            return .failed(
-                stderr: noCriteriaMatchDiagnostic(
-                    criteria, app: appName, roots: liveTree.nodes, nonActionable: nonActionable
-                ),
-                code: .runtimeFailure
-            )
+        switch resolveCriteriaElement(
+            criteria: criteria, app: appName, pid: pid,
+            wait: wait, interval: interval ?? defaultCriteriaWaitInterval,
+            isRunning: isRunning, walkLive: walkLive, makeWaitProbe: makeWaitProbe,
+            now: now, sleep: sleep
+        ) {
+        case let .terminal(outcome):
+            return outcome
+        case let .resolved(target):
+            liveTree = target.tree
+            match = target.match
         }
         guard let element = liveTree.elementsByPath[match.path] else {
             // Every walked node records its handle, so this is unreachable in

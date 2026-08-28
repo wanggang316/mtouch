@@ -42,12 +42,32 @@ public enum ActTargetGrammar {
     /// when exactly one well-formed mode is selected.
     ///
     /// Rules (all → exit 64): exactly ONE of `<ref>` / `--of`; `--of` requires
-    /// `--app`; `--of` must be non-empty. (`--app` beside a `<ref>` stays
-    /// accepted, as it always was: the ref's session names the application, and
-    /// the override is recorded but never consulted.)
-    public static func selectionError(ref: String?, of: String?, app: String?) -> String? {
+    /// `--app`; `--of` must be non-empty; `--wait` requires `--of`; `--interval`
+    /// requires `--wait`. (`--app` beside a `<ref>` stays accepted, as it always
+    /// was: the ref's session names the application, and the override is recorded
+    /// but never consulted.)
+    ///
+    /// `hasWait` / `hasInterval` report PRESENCE only — the duration values are
+    /// parsed by each surface (exit 64 on the CLI, invalid-arguments over MCP)
+    /// before they reach here, so this stays a pure shape check.
+    public static func selectionError(
+        ref: String?, of: String?, app: String?, hasWait: Bool = false, hasInterval: Bool = false
+    ) -> String? {
         if let of, of.trimmingCharacters(in: .whitespaces).isEmpty {
             return "--of requires a non-empty criteria, e.g. 'button \"Seven\"' or 'textfield'."
+        }
+        // The wait rules are checked BEFORE the target rules, so an invocation that
+        // clearly means to wait is told what is wrong with the WAIT rather than
+        // being sent round a second time by the generic "provide exactly one
+        // target" message. With a well-formed `--of` they cannot fire at all.
+        if hasWait, of == nil {
+            return "--wait is only valid together with --of: a <ref> addresses an element from a "
+                + "snapshot that has already been taken, so there is nothing to wait for. Target the "
+                + "element with --of <criteria> --app <bundleId> to wait for it to appear, or drop --wait."
+        }
+        if hasInterval, !hasWait {
+            return "--interval is only valid together with --wait: without a wait there is no polling "
+                + "to pace. Add --wait <duration>, or drop --interval."
         }
         if ref != nil, of != nil {
             return "<ref> cannot be combined with --of: they are different ways to target an element, "
