@@ -19,6 +19,7 @@ struct MTouch: ParsableCommand {
             Record.self,
             Report.self,
             MCP.self,
+            Batch.self,
             // DEV-ONLY, hidden from --help (shouldDisplay: false). Not one of the
             // public subcommands; exercises AXTreeWalker against a live app.
             WalkSmoke.self,
