@@ -3,6 +3,8 @@
 .harness-runtime/
 tests/runs/
 tests/**/*.png
+# `mtouch screenshot` with no --out writes here; keep stray captures out of the repo
+mtouch-screenshot-*.png
 .DS_Store
 dist/
 mtouch-*-macos-*.tar.gz

@@ -1,183 +1,198 @@
-# mtouch — Architecture
-
-> The structural map of mtouch, an agent-facing macOS UI automation tool for automated testing.
-> Code is the source of truth; this records durable structure and conventions, updated at milestone
-> boundaries. Written at the M1-perception seal (2026-08-06).
+# Architecture
 
 ## What mtouch is
 
-A native Swift CLI + (M3) MCP stdio server that lets AI agents perceive and drive arbitrary
-third-party macOS apps. Perception and element actions go through the Accessibility API
-(`AXUIElement`), input synthesis through `CGEvent`, screenshots through ScreenCaptureKit. The
-agent-facing contract is **AX-tree-as-text + snapshot-scoped refs + post-action AX diff as
-verification**, with explicit wait primitives (no sleeps) and trajectory recording.
+A native Swift CLI that lets an AI agent perceive and drive arbitrary macOS
+applications. The contract is deliberately narrow: an accessibility tree rendered
+as compact text with scoped refs, actions addressed by ref or by criteria, and an
+AX diff returned as the action's own verification. Everything else — screenshots,
+recordings, run bundles — exists to cover cases the AX tree cannot, or to make a
+run auditable afterwards.
 
-## Package layout (SwiftPM, macOS 14+, Swift 6)
+## Package layout
 
-- **`MTouchKit`** (library) — all logic; **ArgumentParser-free** so it is unit-testable and reusable.
-- **`mtouch`** (executable) — thin CLI over `MTouchKit` using swift-argument-parser; the only place
-  CLI concerns (parsing, exit codes as `ExitCode`) live.
-- **`MTouchKitTests`** — hermetic unit tests over fake providers; no AX/TCC/network dependency.
+SwiftPM, macOS 14+ (screen recording to video needs 15+), Swift 6 strict
+concurrency.
 
-## Core data structure
+| Target | Role |
+|---|---|
+| `MTouchKit` (library) | All logic. ArgumentParser-free, every environment touchpoint behind an injectable seam. |
+| `mtouch` (executable) | A thin CLI over the library, plus the MCP stdio server. |
+| `MTouchKitTests` | Hermetic unit tests — no AX, TCC, network, display, or media decoding. |
 
-`AXNode` (value type) is the load-bearing model the whole tool builds on: role, subrole, title,
-value, frame (screen points, top-left origin), enabled, **actionable** (derived from an actionable
-role set OR an `AXPress` action, independent of enabled), isScrollArea, scrollPosition, children.
-The diff engine (M2), wait evaluator (M2), and act layer (M2) all consume `AXNode`.
+The split exists so the environment is never required to test logic. If something
+is hard to test, the seam is in the wrong place.
 
-## Seams & patterns (established M1)
+## The load-bearing value type
 
-- **`AXTreeProvider` seam** — `LiveTreeProvider` (real `AXUIElementCreateApplication` + `AXSupport`
-  helpers) vs. a fake provider for tests, so the walker and all rendering are testable with zero AX.
-- **Perception pipeline** (`SnapshotPipeline`): preflight → resolve bundle id→pid → bounded walk →
-  scroll-position enrichment → render (text/JSON) → persist session. Thin composition; heavy lifting
-  in named MTouchKit pieces.
-- **Menu collapse** (`MenuDescent`): closed submenus (nil/zero-size `AXMenu` frame) are NOT expanded;
-  the owner menu-bar/menu item stays actionable. Perception matches the action model — items appear
-  only after `act show-menu` opens the menu (frame becomes non-zero → walked).
-- **Bounded walk** (`BoundedWalk`): an 8s wall-clock deadline turns a hung/SIGSTOPped target into an
-  explicit exit-1 timeout, never an indefinite hang. It abandons (not cancels) the walk thread, so
-  M2 `wait` polls through `GuardedWalk` — a single-flight cap that keeps at most ONE walk in flight on
-  a hung target (never one leaked thread per poll); M3 `mcp` (long-running) reuses the same guard.
-- **Secret-safety** (`SnapshotSecure`): secure-text-field values are masked at a single chokepoint on
-  every surface (text, JSON) and the persisted ref table (`RefEntry`) carries no value at all; the
-  session digest hashes already-masked JSON. A planted secret cannot reach any output or the state file.
-- **Session store** (`SessionStore`): current snapshot (ref table + digest) persisted to
-  `~/.mtouch/session.json` (or `$MTOUCH_SESSION`), atomic temp+rename write; corrupt→absent;
-  `RefResolution` = resolved/stale/unknown/noSession → CLI exit 0/3/64/3.
+`AXNode` — role, subrole, title, value, description, identifier, frame, enabled,
+actionable, children. Everything upstream produces it and everything downstream
+consumes it: the walker builds it, the textualizer and JSON renderer format it,
+the diff engine compares it, criteria match against it, and refs are issued for
+the actionable ones.
 
-## Seams & patterns (established M2-action-loop)
+## The three pipelines
 
-- **Input synthesis chokepoint** (`InputSynthesizer` over `Activator` / `SecureInputState` /
-  `EventPoster`): the single place every keyboard/mouse `CGEvent` is built and posted. Keyboard verbs
-  refuse when secure input is active BEFORE activating or posting (zero events, payload-free diagnostic
-  → exit 5); the target app is always activated before any event. `KeyCombo(parsing:)` is the only
-  key-name interpreter (unknown names → usage error 64).
-- **Unified act pipeline** (`ActPipeline`): ref, keyboard, and coordinate verbs share one back half —
-  resolve target → (ref only: re-locate by hint, never a positional impostor) → act → bounded
-  early-stopping settle re-walk → `DiffEngine` diff → persist the reconciled session. Precedence
-  64 → 2 → 3 → 1 is encoded by order in an AX-free front half; a rejected case delivers zero events.
-  Coordinate verbs add an off-screen guard (`ScreenBounds` / `CGDisplayBounds`) validated before any
-  event is posted.
-- **Post-action diff** (`DiffEngine`): identity = role + structural PATH; title/value/enabled/frame
-  are changeable attributes; matched nodes keep their ref, added actionable nodes get fresh continuing
-  refs, removed refs go stale; digest reuses the single `Session.digest` scheme. KNOWN LIMITATION:
-  positional identity does not re-pair a node that shifted to a new path — a root insert/remove (e.g. a
-  window close while the menu bar is a sibling root) reads as remove+re-add of the shifted subtrees
-  rather than a minimal removal. A role+title cross-path fallback is the pending fix.
-- **Guarded poll** (`WaitPoll` + `GuardedWalk`): `wait` observes only (never delivers input), checks
-  before sleeping (already-true returns fast), fails only at ≥ timeout, does exactly one check at
-  `--timeout 0`, and never leaks threads on a hung target.
+Each user-facing capability is a pipeline: a pure composition over injected seams,
+with the CLI and MCP surfaces as two thin callers. That is why CLI and MCP
+payloads are byte-identical — they are the same function.
 
-## Seams & patterns (established M3-agent-surface)
+```
+                 ┌──────────────┐
+   perceive ───► │ Snapshot /   │  walk → filter noise → collapse menus →
+                 │ Read         │  cut cycles → label → assign refs → render
+                 └──────────────┘
+                 ┌──────────────┐
+   act      ───► │ Act          │  resolve target (ref | criteria [| wait]) →
+                 │              │  activate → deliver → flush → settle → diff
+                 └──────────────┘
+                 ┌──────────────┐
+   verify   ───► │ Wait         │  bounded poll over an injected clock:
+                 │              │  appears / disappears / text / value / stable
+                 └──────────────┘
+```
 
-- **Screenshot pipeline** (`ScreenshotPipeline` over `LiveScreenCapture`): preflight Screen Recording
-  (exit 2, no file) → resolve target/path → capture (SCK) → all-black backstop → PNG encode → atomic
-  temp+rename write. Every collaborator is injectable, so the flow is unit-testable with zero SCK/TCC.
-  Pixel dims are `filter.contentRect` (points) × `filter.pointPixelScale`, so `pixels == points × scale`
-  holds by construction; `--window` addresses the SAME `CGWindowID` space `mtouch windows` prints.
-  Black-capture safety is two-layered — the SR preflight is the primary guard,
-  `ScreenCaptureImage.isEffectivelyBlank` the backstop — and neither ever writes a file.
-  `LiveScreenCapture` runs the async per-window SCK capture on a main-actor task and PUMPS the run loop
-  (`CFRunLoopRunInMode`) rather than blocking (the per-window path needs the main-thread window-server
-  connection; a blocked main thread trips `CGS_REQUIRE_INIT`), guarded by a 15 s deadline so the
-  one-shot CLI can never hang.
-- **MCP dispatch seam** (`MCPToolCatalog` + `MCPToolDispatch`, both SDK-free in MTouchKit): the single
-  source of truth for the seven tools and the one place a tool name + arguments map onto the existing
-  pipelines (Snapshot/Act/Wait/Screenshot, enumeration, DoctorReport) — never re-implementing their
-  logic — returning a `ToolResult` (payloads + isError). Payload parity holds because dispatch returns
-  the pipelines' outcome strings verbatim. Domain failures (unknown tool, missing/invalid arg, wait
-  timeout, stale ref, missing permission) are `isError` results; protocol problems (unknown method,
-  malformed frame, pre-initialize call) are JSON-RPC errors. The executable
-  (`Sources/mtouch/Commands/MCP.swift`) keeps stdout pure (only JSON-RPC frames; transport logger left
-  no-op), gates pre-init calls in the handler (the SDK's strict mode silently drops them), and hops
-  tool work to the main thread via a `CFRunLoopPerformBlock` run-loop block — NOT `MainActor.run` /
-  `DispatchQueue.main.async`, which would deadlock the screenshot capture's nested run-loop pump. The
-  long-running server reuses `GuardedWalk`, so it never leaks walk threads.
-- **Trajectory recorder** (`TrajectoryRecorder` + `TrajectoryRecord`): a cross-cutting OBSERVER both
-  surfaces route through — the CLI via `Support.swift recorded(…)`, MCP via
-  `MCPToolDispatch.dispatchRecorded(…)` — feeding one record model so a command and its tool shape
-  identically (same field names). Recording NEVER alters observable behavior: with `MTOUCH_TRAJECTORY`
-  unset it is a pure pass-through; when set it appends exactly one atomic `O_APPEND` `write(2)` of the
-  full `<json>\n` line, so a crash leaves every completed line parseable and concurrent writers never
-  interleave. Per-class shapes: snapshot carries the tree digest; a mutating act carries pre/post
-  `Session.digest` + the diff; reads carry no digests; screenshot references the written PNG path,
-  never image bytes. The digest chain links by construction (each act reads the prior act's persisted
-  digest). A directory/unwritable path aborts (exit 1) BEFORE running the operation — never a silent
-  unrecorded run — and a secure-input-refused `type`/`key` records the event but strips its
-  `text`/`combo` payload so a secret never persists.
+Supporting pipelines follow the same shape: `Windows`, `AppLifecycle`,
+`Clipboard`, `Screenshot`, `Record`, `Report`, `Batch`, `Init`.
 
-## Interfaces (pinned; authority = plan.md "Interface semantics")
+## Perception
 
-- Exit codes: 0 ok · 1 runtime · 2 permission · 3 ref · 4 wait-timeout · 5 secure-input · 64 usage;
-  precedence 64 → 2 → 3 → 1.
-- Every read subcommand supports `--json`; snapshot `--json` is `{ "nodes": [...] }` (object, not a
-  bare array); frames in points; `scrollPosition` as normalized 0..1 `{x,y}`.
-- Sessions/recording isolate via `$MTOUCH_SESSION` / `$MTOUCH_TRAJECTORY`; CLI↔MCP share one session file.
+**Walking.** `AXTreeWalker` reads an application element's children over the AX
+IPC boundary. Three guards make it safe against hostile trees: a per-read
+messaging timeout, a whole-walk deadline (`BoundedWalk`) so a hung target cannot
+wedge the CLI, and cycle detection (`AXCycleGuard`) because applications do expose
+themselves as their own children. A depth cap remains as a backstop only.
 
-## TCC / environment
+**Filtering.** `SnapshotNoise` drops elements that carry neither actionable
+content nor text, memoized bottom-up so the pass is O(n). Menus collapse unless
+open — a closed menu's items are not reachable by an agent, so advertising them
+would be a lie the action layer cannot honour.
 
-Accessibility is the only *required* permission (doctor exits 2 iff missing); Screen Recording is
-optional (only `screenshot` needs it). Grants attach to the **invoking terminal app**, not the binary
-— so an ungranted persona is unrealizable from a granted terminal without TCC mutation (forbidden);
-such assertions are verified at the unit level or deferred to an ungranted CI runner. No headless mode.
+**Labelling.** `AXLabel` picks the first available of title → value → description
+→ identifier, marking non-title sources `@desc` / `@id`. Without this, controls
+that carry no title are indistinguishable and unaddressable.
 
-## Seams & patterns (established M4/M5 — control surface & evidence)
+**Refs.** Actionable elements get `e1`, `e2`, … scoped to the snapshot that issued
+them and persisted in a session file. Ref identity is role + subrole + title +
+description + identifier, pinned to the owning `CGWindowID`. Every component was
+added because omitting it caused a silent misdelivery: the window id stopped a
+ref matching an identically-titled window in another window; the label stopped a
+sibling shift re-pointing refs at their neighbours.
 
-- **App lifecycle** (`AppControl` / `AppLifecycle`): `WorkspaceControl` is a seam over launch,
-  frontmost detection and termination. The live implementation deliberately does NOT use
-  `NSWorkspace.runningApplications` / `.frontmostApplication` for POLLING: those properties never
-  refresh without a main run loop, which a one-shot CLI never runs, so a launched process is never
-  observed and an app switch is never seen. Both failure directions are silent-but-wrong (a healthy
-  launch reads as a timeout, a successful activation as a lost race). Readiness uses a LaunchServices
-  query; frontmost verification uses the AX system-wide focused application. `resolveRunningPID` is
-  unaffected because it is a single read, not a poll.
-- **Menu-path invocation** (`MenuPath` / `MenuNavigator` / `ActMenuPipeline`): drives the menu bar by
-  title path with exact → case-insensitive → localized matching. This is the reliable route into
-  AX-opaque apps whose editor views expose nothing: the menu bar is still a real AX tree, so every
-  step is a verifiable press. **Every failure path closes the menus it opened** — a failed attempt
-  that leaves a menu open wedges the UI for everything after it.
-- **Quiescence** (`WaitQuiescence`): a scoped tree digest plus a clock-injected tracker; any change
-  resets the quiet window. Used by `wait --stable` and by the act pipeline's settle step, so
-  "settled" means one thing in the codebase, not two.
-- **Element identity** (`AXLabel`, `NodeHint`, `MatchKey`): role + subrole + title + description +
-  identifier, pinned to the owning `CGWindowID`. Labels are part of ref identity because controls
-  with no title are otherwise indistinguishable, and a positional carry-over silently re-points a ref
-  at its neighbour. `usableIdentifier` filters AppKit's `_NS:<n>` nib-decoding indices out of the
-  DISPLAY label (they are meaningless and build-unstable) while JSON still publishes the raw value.
-- **Cycle safety** (`AXCycleGuard`): applications can expose their own application element as their
-  own child. Without cycle detection the walk fills the node budget with recursion and the real
-  window never appears in the snapshot at all. The depth cap is a backstop, not the guard, and a cut
-  is REPORTED in the same grammar as the node-budget truncation marker.
-- **Input delivery** (`InputDeliveryFlush`): `CGEvent.post` is asynchronous. Posting and returning
-  lets the process exit before the window server delivers, which reports success while delivering
-  nothing. Delivery waits on an observable signal (`CGEventSourceCounterForEventType`) with a bounded
-  deadline — not a sleep — and an unconfirmed delivery is reported as such rather than as clean
-  success.
-- **Evidence** (`RunBundle` / `RunCapture` / `RunFrameExtraction` / `RunReport`): a run directory
-  holds `run.json`, the trajectory, per-step stills and a recording. The step counter is allocated
-  under the same advisory lock that guards the append, so concurrent mtouch processes cannot collide
-  on a step index. Evidence collection NEVER breaks the task it documents: a capture failure is
-  recorded and execution continues at the command's normal exit code.
-- **Recording** (`RecordControl` / `RecordArtifact` / `LiveScreenRecorder`): a `setsid`-detached
-  recorder, a control file, and artifact verification. A recording is only reported successful when
-  the recorder COUNTERSIGNED it after finalize — screen capture flushes playable fragments
-  continuously, so a killed capture leaves a well-formed movie that passes every artifact check.
-  Because a second capture session from the same client application invalidates a live recording,
-  step stills during a recording are extracted from the movie instead of captured separately.
+**Reading.** The text form has a node budget and drops non-actionable nodes past
+it. `read` exists because that budget genuinely bites (1053 nodes dropped on a
+real chat transcript, 227 text blocks unreachable) — it never truncates and can
+address by ref, by criteria, or whole-app.
 
-## Milestones
+## Action
 
-- **M1-perception** (sealed 2026-08-06): scaffold, doctor/TCC preflight, app/window enumeration, AX
-  walker + Electron fallback, textualization/refs/noise/secure-mask, session store, snapshot CLI,
-  menu-collapse.
-- **M2-action-loop** (sealed 2026-08-06): CGEvent synthesis, post-action diff, act element/typing/
-  coordinate commands, wait primitives.
-- **M3-agent-surface** (sealed 2026-08-07): ScreenCaptureKit screenshots, the MCP stdio server, and
-  trajectory recording.
-- **M4-control-surface / M5-evidence** (2026-08-27/28): app lifecycle, clipboard, menu-path
-  invocation, quiescence waits, untruncated + criteria-scoped reads, `--pid` targeting, AX error
-  surfacing, cycle safety, label-based element identity, unverified delivery, the delivery flush, the
-  run evidence bundle, screen recording, and the HTML report. Driven by end-to-end scenarios against
-  real third-party applications; every defect listed above was found that way, not by unit tests.
+**Targeting.** A ref, or a criteria (`--of`, the same grammar `wait` uses),
+optionally with `--wait` to poll until the criteria resolves. Criteria resolution
+happens against the action's own pre-walk, so a scripted flow needs no snapshot
+and has no ref that can go stale. Ambiguity is refused with candidates listed —
+acting on many matches is misdelivery, whereas *reading* many is safe, so
+`read --of` returns them all.
+
+**Delivery.** Two channels with different properties: AX actions
+(`AXPress`, set-value) reach an element directly and need no frontmost; CGEvent
+synthesis (`type`, `key`, coordinates) goes through the HID layer and does. The
+event poster is a seam; `InputDeliveryFlush` waits on an observable event counter
+because `CGEvent.post` is asynchronous and returning too early delivers nothing.
+
+**Verification.** The post-action walk produces a diff via `DiffEngine`, which
+matches elements positionally with a role+label cross-path fallback so a root
+insert (a window opening) reads as a minimal change rather than a cascade.
+`DiffSettle` waits for a diff that *repeats* rather than the first non-empty one —
+a still-rendering UI otherwise yields a partial or unrelated diff, which is worse
+than none.
+
+**Grading.** Where evidence is weaker than usual the outcome says so:
+`verified` (a diff was taken), `deliveryConfirmed` (delivery was observed), and
+`settled` (the reading was stable). Each is a distinct `ActOutcome` case, so no
+consumer can silently treat it as ordinary success.
+
+**Menu paths.** `act menu "File>Save"` walks the menu bar by title with
+exact → case-insensitive matching, and always closes menus it opened on any
+failure path. This is the reliable route into applications whose document views
+expose nothing.
+
+## Synchronization
+
+`WaitPoll` is a pure bounded loop over an injected clock and sleep — there is no
+`sleep` anywhere in the product. Conditions: `appears`, `disappears`, `text`,
+`value-equals`, and `stable` (quiescence: any change resets the quiet window).
+Quiescence is shared with the act pipeline's settle step, so "settled" means one
+thing in the codebase rather than two.
+
+Failure paths consult `ProcessLiveness` before reporting a timeout, because "the
+application died" and "the element is not there yet" demand opposite responses
+from an agent.
+
+## Vision fallback
+
+`screenshot` captures via ScreenCaptureKit, full screen or a single window by
+`CGWindowID` — the same id space `windows` reports, which is what lets an agent
+correlate the two. This path works on applications with no usable AX tree at all,
+and needs the Screen Recording grant.
+
+## Evidence
+
+`MTOUCH_RUN_DIR` turns a sequence of invocations into an auditable bundle:
+`run.json`, a JSONL trajectory (one record per command), per-step stills, and a
+screen recording. The step counter is allocated under the same advisory lock that
+guards the trajectory append, so concurrent processes cannot collide.
+
+`record` runs a `setsid`-detached recorder with a control file; `stop` verifies
+the artifact and requires the recorder's countersignature, because capture flushes
+playable fragments and a killed recorder leaves a movie that passes every check.
+During a recording no second capture session is opened — one invalidates the other
+— so step stills are extracted from the movie at each step's timestamp, which also
+makes them provably contemporaneous.
+
+`report` renders the bundle into one offline, deterministic HTML page.
+
+## Agent surfaces
+
+| Surface | Shape |
+|---|---|
+| CLI | 15 subcommands, exit-code taxonomy, `--json` on read commands |
+| MCP stdio (`mtouch mcp`) | 10 tools, payloads byte-identical to the CLI, zero network endpoints |
+| `batch` | JSONL of MCP-shaped tool calls executed in one process |
+| `init` | Registers the MCP server with an agent client and installs usage doctrine |
+
+`batch` reuses the MCP dispatch verbatim, which is why every capability worked in
+a batch the day it shipped. The MCP server hops tool handlers onto the main thread
+because AX reads and capture require it, while the SDK is actor-based.
+
+## Interfaces (pinned)
+
+- **Exit codes:** `0` ok · `1` runtime · `2` permission · `3` ref · `4` wait
+  timeout · `5` secure input · `64` usage. Precedence `64 → 2 → 3 → 1`.
+- **Output discipline:** stdout is empty or valid payload, never a hybrid;
+  diagnostics go to stderr; `--json` shapes are hand-built for fixed key order.
+- **Isolation:** `MTOUCH_SESSION` / `MTOUCH_TRAJECTORY` / `MTOUCH_RUN_DIR`. CLI
+  and MCP share one session file by design.
+
+The authoritative specification is
+`.harness-runtime/plans/mtouch/validation-contract.md`. Changing observable
+behaviour means amending it.
+
+## Permissions
+
+Accessibility is the only *required* grant; Screen Recording is needed for
+`screenshot` and `record`. Grants attach to the **invoking terminal application**,
+not to the binary — so an ungranted persona cannot be realized from a granted
+terminal without mutating TCC, which is forbidden. Those assertions are verified
+by a dedicated CI job on a fresh runner instead.
+
+## Testing strategy
+
+| Layer | Where |
+|---|---|
+| Logic | Hermetic unit tests through seams — the whole suite, no environment |
+| Wiring | `ci/smoke.sh` against the shipped binary: subcommand surface, exit-code taxonomy, MCP handshake, rendered report |
+| Environment-only behaviour | Live scenarios against real applications, plus the ungranted-persona CI job |
+
+Unit tests cannot find the defects that matter most here. Every significant bug in
+this project's history was found by running a real task against a real
+application; the unit suite's job is to keep them fixed.

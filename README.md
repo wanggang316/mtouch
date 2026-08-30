@@ -4,47 +4,76 @@
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 ![Platform](https://img.shields.io/badge/platform-macOS%2014%2B-lightgrey)
 
-`mtouch` is a native Swift, **agent-facing macOS automation tool** built for stable automated testing. It lets an AI agent (or any script) perceive and drive arbitrary third-party macOS apps through the Accessibility API, with a compact text/JSON contract designed for LLM token budgets — and it leaves behind an audit trail a human can check.
+**Let an AI agent operate a Mac — and leave behind evidence of what it did.**
 
-The agent-facing contract is **AX-tree-as-text + snapshot-scoped refs + post-action AX diff as verification**, with explicit wait primitives (no sleeps), a ScreenCaptureKit vision fallback, and a run evidence bundle (structured log, per-step stills, screen recording, HTML report).
+mtouch is a native Swift CLI that drives arbitrary macOS applications through the
+Accessibility API, with a token-efficient contract designed for LLM budgets. It is
+built for automated testing, where a tool that quietly does the wrong thing is
+worse than no tool at all.
 
-## Design stance
+```sh
+brew install wanggang316/tap/mtouch
+mtouch init --client claude
+```
 
-Three rules explain most of what follows.
+## What it looks like
 
-1. **A wrong answer is worse than a refusal.** An ambiguous bundle id is refused with the candidate pids, not guessed. A ref whose element moved is rejected (exit 3, "Nothing was acted on"), not re-pointed at a neighbour. An accessibility read that fails is an error, never rendered as an empty result.
-2. **An action must return evidence — and grade it.** Every `act` returns an AX diff. Where the evidence is weaker than usual the output says so, both on stdout and as a machine-readable field: `verified:false` (no diff taken, you asked for `--no-verify`), `deliveryConfirmed:false` (posted but delivery unconfirmed), `settled:false` (the UI was still changing when the settle budget expired). A *wrong* diff is worse than no diff, so mtouch reports its own uncertainty instead of guessing.
-3. **No `sleep`, anywhere.** Every synchronization point is an explicit, bounded wait on an observable condition.
+```sh
+mtouch app launch --app com.apple.calculator --wait-ready 15s
 
-## Highlights
+mtouch snapshot --app com.apple.calculator
+#   AXButton "7"@desc #e5   AXButton "乘"@desc #e8   AXButton "等于"@desc #e20
 
-- **Perception** — walk an app's accessibility tree into compact, ref-annotated text (`e1`, `e2`, …) or stable JSON; noise-filtered, menu-collapsed, cycle-safe, Electron-aware, with secure-field values masked. Elements are labelled by title, value, **accessibility description, or identifier**, so controls that carry no title are still addressable.
-- **Reading** — `read` returns an element's **untruncated** text: by ref, by criteria (`--of`), or the whole app, for content the snapshot's node budget would drop.
-- **Action** — `press` / `focus` / `show-menu` / `set-value` by ref **or by criteria** (`--of 'button "Seven"' --wait 5s` — a scripted flow needs no snapshot and no refs; the optional wait polls until the target resolves, and an ambiguous match is refused, never guessed), `menu "File>Save"` by menu-bar path, plus `click` / `rightclick` / `doubleclick` / `drag` / `scroll` by coordinate and `type` / `key` via CGEvent. Every action returns an **AX diff** as built-in verification.
-- **App control** — `app launch` / `activate` / `quit` with polled readiness and **verified** activation, plus `clipboard get` / `set` / `clear` with a read-back check.
-- **Synchronization** — `wait --appears/--disappears/--text/--value-equals`, and `--stable` **quiescence**: wait until a streaming or animating region stops changing.
-- **Vision fallback** — `screenshot` via ScreenCaptureKit (full screen or per-window by `CGWindowID`), for AX-opaque apps.
-- **Evidence** — `MTOUCH_RUN_DIR` collects `run.json`, a JSONL trajectory, per-step stills and a screen recording; `mtouch report` renders them into one offline, deterministic HTML page.
-- **Throughput** — `mtouch batch` executes many MCP-shaped tool-call steps in ONE process (a typo anywhere refuses the whole batch before step 1; the first failing step stops it). Measured: an 8-press flow drops from ~1.65s across 8 processes to ~1.17s, and 10 agent round-trips become 1.
-- **Failure honesty** — a DEAD target is diagnosed as dead (exit 1, "relaunch it"), never as a stale element (exit 3, "re-snapshot") or a burned timeout; `wait` fails fast when its target dies mid-poll.
-- **Agent surface** — an **MCP (Model Context Protocol) stdio server** (`mtouch mcp`) exposing every capability with payloads byte-identical to the CLI. Zero network endpoints.
+mtouch act press e5                     # every action returns an AX diff
+mtouch read --of 'scrollarea "编辑字段"'  # read the result back
+```
 
-### Why `--stable` exists
+Or skip snapshots entirely — address elements by what they *are*, and let the
+action wait for them:
 
-Measured against a streaming answer in a real application:
+```sh
+mtouch act press --of 'button "Save"' --wait 5s --app <bundle-id>
+```
+
+## Why you might want it
+
+**Actions verify themselves.** Every `act` returns an accessibility diff showing
+what changed. When that evidence is weaker than usual, the output says so rather
+than pretending — `verified: false`, `deliveryConfirmed: false`, `settled: false`.
+A *wrong* diff is worse than no diff.
+
+**It refuses instead of guessing.** An ambiguous bundle id lists the candidate
+pids. A ref whose element moved is rejected rather than re-pointed at its
+neighbour. A failed accessibility read is an error, never an empty result. Each of
+those was once a silent wrong answer here, and each now has a regression test.
+
+**No `sleep`, anywhere.** Waiting is an explicit, bounded condition — including
+the one people forget: waiting for content to *stop changing*.
 
 | wait | returned after | captured |
 |---|---|---|
 | `--text <first fragment>` | 0.71 s | 212 chars |
 | `--stable --stable-for 1s` | 15.21 s | 4197 chars |
 
-**Both exit 0.** Without quiescence an agent silently proceeds on 5% of the answer — the failure mode that makes UI automation untrustworthy.
+Both exit 0. Without quiescence an agent proceeds on 5% of a streamed answer with
+nothing to warn it.
+
+**It works on applications with no accessibility tree.** Menu paths
+(`act menu "File>Save"`) drive editors whose document views expose nothing, and
+ScreenCaptureKit covers the rest.
+
+**Runs are auditable.** Point `MTOUCH_RUN_DIR` at a folder and get a structured
+log, per-step stills, a screen recording, and a single offline HTML report.
 
 ## Requirements
 
-- macOS 14+ (Sonoma or later); **screen recording to video requires macOS 15+**
-- Swift 6 / Xcode 16+
-- **Accessibility** permission granted to the invoking terminal app (required); **Screen Recording** for `screenshot` and `record`
+- macOS 14+ (Sonoma). Screen **recording to video** requires macOS 15+.
+- Apple Silicon for the prebuilt binary; Intel users build from source.
+- **Accessibility** permission for the invoking terminal application, and
+  **Screen Recording** for `screenshot` / `record`. Run `mtouch doctor` to check.
+
+macOS attaches these grants to the terminal you run mtouch *from*, not to mtouch
+itself — which surprises nearly everyone the first time.
 
 ## Install
 
@@ -53,9 +82,12 @@ brew install wanggang316/tap/mtouch
 mtouch init --client claude    # register the MCP server + install agent instructions
 ```
 
-`mtouch init` with no arguments lists what it would do and changes nothing; `--print` dry-runs it. Running it twice is safe — an existing registration is left alone, and a *differing* one is reported rather than silently overwritten.
+`mtouch init` with no arguments lists what it would do and changes nothing;
+`--print` dry-runs it. Running it twice is safe: an existing registration is left
+alone, and a *differing* one is reported rather than silently overwritten.
 
-Or grab the release tarball directly:
+<details>
+<summary>Without Homebrew</summary>
 
 ```sh
 VER=v0.2.2
@@ -64,74 +96,76 @@ tar xzf "mtouch-${VER}-macos-arm64.tar.gz"
 ./mtouch-${VER}-macos-arm64/mtouch doctor
 ```
 
-Prebuilt binaries target Apple Silicon (arm64); on Intel, build from source. Grant the invoking terminal **Accessibility** in System Settings → Privacy & Security first (`mtouch doctor` reports status).
+Or from source: `swift build` → `.build/debug/mtouch`.
+</details>
 
-## Quick start
+## Command surface
 
-```sh
-mtouch doctor                                   # 1. check permissions
-mtouch app launch --app com.apple.calculator --wait-ready 15s
+| | |
+|---|---|
+| **Perceive** | `snapshot` · `read` · `windows` · `apps` |
+| **Act** | `act press/focus/show-menu/set-value` (by ref or `--of` criteria) · `act menu` · `act click/drag/scroll/type/key` |
+| **Wait** | `wait --appears/--disappears/--text/--value-equals/--stable` |
+| **Control** | `app launch/activate/quit` · `clipboard get/set/clear` |
+| **Vision** | `screenshot` · `record start/stop/status` |
+| **Evidence** | `report` |
+| **Agent** | `mcp` (10 tools, byte-identical payloads) · `batch` · `init` |
+| **Health** | `doctor` |
 
-mtouch snapshot --app com.apple.calculator      # 2. perceive (refs come from here)
-#   AXButton "7"@desc #e5   AXButton "乘"@desc #e8   AXButton "等于"@desc #e20
+`mtouch <command> --help` documents each one.
 
-mtouch act press e5                             # 3. act — each action returns a diff
-mtouch read --of 'scrollarea "编辑字段"'          # 4. read the result back
-```
-
-`@desc` / `@id` mark a label that came from the accessibility description or identifier rather than a title.
-
-## Working with an evidence bundle
+## Evidence bundles
 
 ```sh
 RUN=~/runs/my-task
 mtouch record start --run-dir "$RUN" --max-duration 600s
-MTOUCH_RUN_DIR=$RUN MTOUCH_RUN_CAPTURE=1 MTOUCH_RUN_LABEL="my task" \
-  mtouch act press e5
+MTOUCH_RUN_DIR=$RUN MTOUCH_RUN_CAPTURE=1 mtouch act press --of 'button "Save"' --app <id>
 mtouch record stop --run-dir "$RUN"
-mtouch report "$RUN"          # -> $RUN/report.html, opens offline
+mtouch report "$RUN"          # → report.html, opens offline
 ```
 
-While a recording is live, mtouch takes **no** second screen capture — step stills are extracted from the movie at each step's timestamp, so they provably come from the same recording. A standalone `screenshot` during a recording is refused rather than silently invalidating it.
+While a recording is live, step stills are extracted from the movie rather than
+captured separately — so they provably come from the same recording, and the
+recording is never invalidated to get them.
 
-> **The bundle contains whatever was on screen.** Screenshots and recordings capture everything visible, and the trajectory strips payload keys (`text`, `combo`, `value`) only on FAILED records — a successful `act type <secret>` is in the log verbatim. Use `mtouch report --redact` for a log-only bundle.
-
-## Environment variables
-
-| Variable | Effect |
-|---|---|
-| `MTOUCH_SESSION` | Path to the ref session file (isolates concurrent agents) |
-| `MTOUCH_TRAJECTORY` | JSONL trajectory path; explicitly set, it wins over the run bundle's default |
-| `MTOUCH_RUN_DIR` | Collect a run evidence bundle here (also `--run-dir`) |
-| `MTOUCH_RUN_CAPTURE` | `1` enables per-step stills (also `--capture`) |
-| `MTOUCH_RUN_LABEL` | Human label recorded in `run.json` |
+> **A bundle contains whatever was on screen.** The trajectory strips payload keys
+> (`text`, `combo`, `value`) only on *failed* records, so a successful
+> `act type <secret>` is in the log verbatim. Use `mtouch report --redact` before
+> sharing one.
 
 ## Exit codes
 
-`0` ok · `1` runtime failure (includes an ambiguous bundle id and a refused AX read) · `2` permission missing · `3` ref error (stale/unknown/no-session) · `4` wait timeout · `5` secure input active · `64` usage error. Check precedence: `64 → 2 → 3 → 1`.
+`0` ok · `1` runtime · `2` permission missing · `3` ref error · `4` wait timeout ·
+`5` secure input active · `64` usage error. Precedence: `64 → 2 → 3 → 1`.
 
-## Targeting an application
+Two are recoverable without human help: **3** (re-snapshot and retry) and **4**
+(wait longer, or for a different condition). A dead target is its own diagnosis —
+exit 1 telling you to relaunch, never a misleading exit 3.
 
-`--app <bundleId>` is required. When **several processes share one bundle id** (a second browser profile, a helper instance), mtouch refuses and lists the candidate pids rather than binding to one; pass `--pid <pid>` to choose. A pid that contradicts `--app` is a usage error.
+## Documentation
+
+| | |
+|---|---|
+| [docs/agent-guide.md](docs/agent-guide.md) | Driving a computer with mtouch — the practical guide |
+| [docs/architecture.md](docs/architecture.md) | How it is built and why |
+| [docs/platform-notes.md](docs/platform-notes.md) | macOS behaviours learned the hard way |
+| [docs/golden-rules.md](docs/golden-rules.md) | What this project refuses to do |
+| [CHANGELOG.md](CHANGELOG.md) | Release history |
 
 ## Build & test
 
 ```sh
 swift build
-swift test                    # hermetic unit tests (no AX/TCC/network/display)
+swift test                    # hermetic unit tests: no AX, TCC, network, or display
+./ci/smoke.sh                 # end-to-end smoke of the built binary
 make release                  # arm64 release binary
-make package VERSION=v0.2.2   # -> mtouch-v0.2.0-macos-arm64.tar.gz (+ .sha256)
-make ungranted                # ungranted-persona live probes
+make package VERSION=v0.2.2   # release tarball + .sha256
 ```
 
-Continuous integration (GitHub Actions, `macos-15`) runs the unit suite and — because a fresh runner is an *ungranted* host — live-verifies the ungranted fail-fast behaviour that a granted developer machine cannot reproduce. Tests requiring a media decoder are skipped visibly on CI (the runner is headless) and run on developer machines.
-
-## Architecture
-
-- **`MTouchKit`** (library) — all logic, ArgumentParser-free and unit-testable through injectable seams (tree provider, event poster, pasteboard, workspace, capture, recorder).
-- **`mtouch`** (executable) — a thin CLI plus the MCP server.
-
-See [`docs/architecture.md`](docs/architecture.md) for the structural map.
+CI runs three jobs on every push: the unit suite, a CLI smoke of the shipped
+binary, and an **ungranted-persona live verification** — because a fresh runner is
+an ungranted host, and that is the one thing a granted developer machine cannot
+reproduce.
 
 ## License
 
